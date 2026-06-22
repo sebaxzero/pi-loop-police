@@ -1,0 +1,17 @@
+{
+  "name": "pi-loop-police",
+  "version": "1.0.0",
+  "description": "Pi extension that detects and breaks thinking-block loops and tool-call loops in real time",
+  "keywords": ["pi-package"],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test test.mjs"
+  },
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  }
+}
