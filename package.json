@@ -4,6 +4,14 @@
   "description": "Pi extension: detects and interrupts infinite thinking-block and tool-call loops in real time before they exhaust your context window.",
   "keywords": ["pi-package", "pi", "pi-coding-agent", "extension", "loop-detection", "reasoning", "safety", "qwen", "deepseek"],
   "license": "MIT",
+  "homepage": "https://github.com/sebaxzero/pi-loop-police",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sebaxzero/pi-loop-police.git"
+  },
+  "bugs": {
+    "url": "https://github.com/sebaxzero/pi-loop-police/issues"
+  },
   "scripts": {
     "test": "node --test test.mjs"
   },
