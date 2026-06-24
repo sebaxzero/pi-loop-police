@@ -1,5 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 // Loaded from sibling JSON at startup; /set overrides for the current session only
 const cfg = (() => {
@@ -16,8 +19,8 @@ const cfg = (() => {
     SEARCH_EXPAND_LIMIT: 3,
   };
   try {
-    const url = new URL("loop-police.json", import.meta.url);
-    return { ...defaults, ...JSON.parse((globalThis as any).Deno.readTextFileSync(url)) };
+    const extDir = dirname(fileURLToPath(import.meta.url));
+    return { ...defaults, ...JSON.parse(readFileSync(join(extDir, "loop-police.json"), "utf-8")) };
   } catch {
     return defaults;
   }
