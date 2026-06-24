@@ -1,8 +1,8 @@
 {
   "name": "pi-loop-police",
   "version": "1.0.0",
-  "description": "Pi extension that detects and breaks thinking-block loops and tool-call loops in real time",
-  "keywords": ["pi-package"],
+  "description": "Pi extension: detects and interrupts infinite thinking-block and tool-call loops in real time before they exhaust your context window.",
+  "keywords": ["pi-package", "pi", "pi-coding-agent", "extension", "loop-detection", "reasoning", "safety", "qwen", "deepseek"],
   "license": "MIT",
   "scripts": {
     "test": "node --test test.mjs"
