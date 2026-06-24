@@ -90,6 +90,8 @@ Increase `MIN_THINKING_WINDOW` or `PARA_LOOP_THRESHOLD` if you get false positiv
 
 Designed for OpenAI-compatible reasoning models (Qwen3, DeepSeek-R1, etc.) used via pi. Pi normalizes all provider thinking formats to `{ type: "thinking", thinking: string }` content blocks, so this extension works regardless of the underlying provider.
 
+Works alongside [pi-canary](https://github.com/sebaxzero/pi-canary), which silently verifies agent context awareness using hidden canary tokens. When loop-police aborts a turn, pi-canary yields gracefully and does not fire its own recovery.
+
 ## License
 
 MIT
