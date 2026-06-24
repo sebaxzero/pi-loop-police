@@ -1,19 +1,27 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 
-// ponytail: mutable so /loop-police set KEY=VAL works at runtime
-const cfg = {
-  MIN_THINKING_WINDOW: 80,
-  MAX_THINKING_WINDOW: 2000,
-  CHECK_STRIDE: 50,
-  PARA_MIN_LEN: 40,
-  PARA_FINGERPRINT_LEN: 60,
-  PARA_LOOP_THRESHOLD: 3,
-  STAGNATION_WINDOW: 4,
-  STAGNATION_THRESHOLD: 0.85,
-  FILE_READ_LIMIT: 4,
-  SEARCH_EXPAND_LIMIT: 3,
-};
+// Loaded from sibling JSON at startup; /set overrides for the current session only
+const cfg = (() => {
+  const defaults = {
+    MIN_THINKING_WINDOW: 80,
+    MAX_THINKING_WINDOW: 2000,
+    CHECK_STRIDE: 50,
+    PARA_MIN_LEN: 40,
+    PARA_FINGERPRINT_LEN: 60,
+    PARA_LOOP_THRESHOLD: 3,
+    STAGNATION_WINDOW: 4,
+    STAGNATION_THRESHOLD: 0.85,
+    FILE_READ_LIMIT: 4,
+    SEARCH_EXPAND_LIMIT: 3,
+  };
+  try {
+    const path = new URL("loop-police.json", import.meta.url).pathname;
+    return { ...defaults, ...JSON.parse((globalThis as any).Deno.readTextFileSync(path)) };
+  } catch {
+    return defaults;
+  }
+})();
 
 export default function (pi: ExtensionAPI) {
   let thinkingAborted = false;
