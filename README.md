@@ -1,5 +1,8 @@
 # pi-loop-police
 
+[![test](https://github.com/sebaxzero/pi-loop-police/actions/workflows/test.yml/badge.svg)](https://github.com/sebaxzero/pi-loop-police/actions/workflows/test.yml)
+[![npm](https://img.shields.io/npm/v/pi-loop-police)](https://www.npmjs.com/package/pi-loop-police)
+
 A [pi](https://pi.dev) extension that detects and breaks infinite loops in real time — before they waste your context window.
 
 Small reasoning models (Qwen, DeepSeek, etc.) are prone to two kinds of loops:
@@ -11,15 +14,19 @@ Loop Police catches both **mid-stream** (not after the fact), aborts the looping
 
 ## Install
 
+From npm:
+
+```bash
+pi install npm:pi-loop-police
+```
+
+Or from git:
+
 ```bash
 pi install git:github.com/sebaxzero/pi-loop-police.git
 ```
 
-Or install project-locally (adds to `.pi/settings.json` only):
-
-```bash
-pi install git:github.com/sebaxzero/pi-loop-police.git -l
-```
+Add `-l` to either form to install project-locally (adds to `.pi/settings.json` only).
 
 ## How it works
 
@@ -113,6 +120,20 @@ The text injected when a loop is detected is configurable — some models respon
 Designed for OpenAI-compatible reasoning models (Qwen3, DeepSeek-R1, etc.) used via pi. Pi normalizes all provider thinking formats to `{ type: "thinking", thinking: string }` content blocks, so this extension works regardless of the underlying provider.
 
 Works alongside [pi-canary](https://github.com/sebaxzero/pi-canary), which silently verifies agent context awareness using hidden canary tokens. When loop-police aborts a turn, pi-canary yields gracefully and does not fire its own recovery.
+
+## Tests
+
+```bash
+node --test test.mjs
+```
+
+All detectors' pure logic is covered by a dependency-free suite — no build
+step, plain Node. CI runs it on every push and pull request.
+
+## Releasing
+
+Bump `version` in `package.json`, commit, tag `vX.Y.Z`, and push the tag —
+the publish workflow runs the tests and publishes to npm.
 
 ## License
 
