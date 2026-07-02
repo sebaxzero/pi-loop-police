@@ -185,6 +185,12 @@ describe("detectRepeatingSuffix", () => {
     assert.equal(detectRepeatingSuffix(A1 + B + A2 + B), null);
   });
 
+  test("repeating unit longer than MAX_THINKING_WINDOW is not detected (cap)", () => {
+    let unit = "";
+    for (let i = 0; unit.length <= MAX_THINKING_WINDOW; i++) unit += `segment ${i} of unique filler text. `;
+    assert.equal(detectRepeatingSuffix(unit + unit), null);
+  });
+
   test("streaming simulation: loop fires before stream ends", () => {
     const fullLoop = A + B + A + B + A + B;
     let detected = false;
@@ -289,6 +295,12 @@ describe("hashToolCall", () => {
   });
   test("null input", () => {
     assert.equal(hashToolCall("tool", null), hashToolCall("tool", null));
+  });
+  test("array order matters (arrays are not sorted)", () => {
+    assert.notEqual(hashToolCall("t", { files: [1, 2] }), hashToolCall("t", { files: [2, 1] }));
+  });
+  test("array and object with same entries differ", () => {
+    assert.notEqual(hashToolCall("t", { a: ["x"] }), hashToolCall("t", { a: { 0: "x" } }));
   });
 });
 
