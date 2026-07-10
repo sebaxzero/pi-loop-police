@@ -60,7 +60,7 @@ Before each tool executes, the extension hashes `toolName + stableStringify(args
 
 Because detection requires *adjacent* repetition, an interleaved different action breaks it: `build → edit → build` does not trip, so legitimate re-runs after real changes are fine. As long as the model keeps repeating the identical call back-to-back, it keeps getting blocked.
 
-Set `TOOL_LOOP_BAN: 1` to make blocks **permanent per call**: once a specific call loops, that exact call stays blocked for the rest of the session no matter what (stronger against stubborn models, but it will also block legitimate later re-runs of the same command).
+Set `TOOL_LOOP_BAN: 2` to make blocks **permanent per call**: once a specific call loops, that exact call stays blocked for the rest of the session no matter what (stronger against stubborn models, but it will also block legitimate later re-runs of the same command). `TOOL_LOOP_BAN: 0` disables the detector entirely.
 
 Detection is exact — only identical repetitions trigger it, not similar ones.
 
@@ -93,11 +93,26 @@ STAGNATION_THRESHOLD: 0.85  // Jaccard similarity threshold for stagnation
 FILE_READ_LIMIT: 4          // reads of same file path before blocking
 SEARCH_EXPAND_LIMIT: 3      // unique paths for same search pattern before blocking
 CONSECUTIVE_LOOP_LIMIT: 2   // consecutive looped turns before escalating the message
-TOOL_LOOP_BAN: 0            // 0 = block identical call only while repeated back-to-back
-                            // 1 = ban that exact call for the rest of the session
+TOOL_LOOP_BAN: 1            // 0 = off
+                            // 1 = block identical call only while repeated back-to-back
+                            // 2 = ban that exact call for the rest of the session
 ```
 
 Increase `MIN_THINKING_WINDOW` or `PARA_LOOP_THRESHOLD` if you get false positives on thinking loops. Increase `FILE_READ_LIMIT` for projects where legitimately re-reading files is common.
+
+### Disabling individual detectors
+
+Setting a detector's key to `0` turns that detector off entirely:
+
+| Key = 0 | Disables |
+|---------|----------|
+| `MIN_THINKING_WINDOW=0` | character-level thinking loop |
+| `PARA_LOOP_THRESHOLD=0` | semantic (paragraph) loop |
+| `STAGNATION_WINDOW=0` | cross-turn stagnation |
+| `FILE_READ_LIMIT=0` | file read loop |
+| `SEARCH_EXPAND_LIMIT=0` | search expansion spiral |
+| `CONSECUTIVE_LOOP_LIMIT=0` | escalated consecutive-loop message |
+| `TOOL_LOOP_BAN=0` | tool call sequence loop |
 
 ### Customizing recovery messages
 
@@ -114,6 +129,13 @@ The text injected when a loop is detected is configurable — some models respon
 | `MSG_TOOL_LOOP` | identical tool-call sequence repeating | `{windowSize}` |
 
 `{placeholder}` tokens are substituted at runtime; unknown tokens are left as-is so a typo stays visible. Messages are edited in `loop-police.json` only — `/loop-police set` handles numeric keys and will refuse a `MSG_*` key.
+
+## Skills
+
+Two skills ship with the extension:
+
+- **loop-police-help** — reference card: commands, config keys, and where the persistent `loop-police.json` lives for each install type.
+- **loop-police-postmortem** — asks the agent to analyze the loop-police detections in the current session: reconstruct what triggered each firing, classify it (justified / false positive / justified-but-ineffective), and recommend config changes where tuning could have avoided it — as a `/loop-police set` line plus a `loop-police.json` snippet. Trigger it with things like *"why did loop-police fire?"*, *"was that a false positive?"*, or *"do a loop post-mortem"*.
 
 ## Compatibility
 

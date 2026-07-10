@@ -10,7 +10,7 @@
   "FILE_READ_LIMIT": 4,
   "SEARCH_EXPAND_LIMIT": 3,
   "CONSECUTIVE_LOOP_LIMIT": 2,
-  "TOOL_LOOP_BAN": 0,
+  "TOOL_LOOP_BAN": 1,
   "MSG_THINKING_LOOP": "⚠️ THINKING LOOP DETECTED: Your thinking block was repeating the same phrases verbatim and has been truncated. Re-examine your approach and continue with the task.",
   "MSG_SEMANTIC_LOOP": "⚠️ SEMANTIC LOOP DETECTED: Your thinking block was cycling through the same reasoning steps repeatedly. The repeated section has been truncated. Step back and try a completely different approach.",
   "MSG_CONSECUTIVE_LOOP": "⚠️ CONSECUTIVE LOOP ({count}x): You have entered a thinking loop {count} times in a row and loop-police has aborted your thinking each time. Stop thinking now — provide a direct answer or ask for clarification.",

@@ -9,6 +9,14 @@ import { fileURLToPath } from "node:url";
 const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 
+// Setting a detector's key to 0 disables that detector entirely:
+//   MIN_THINKING_WINDOW=0    → character-level thinking loop off
+//   PARA_LOOP_THRESHOLD=0    → semantic loop off
+//   STAGNATION_WINDOW=0      → cross-turn stagnation off
+//   FILE_READ_LIMIT=0        → file read loop off
+//   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
+//   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
+//   TOOL_LOOP_BAN=0          → tool call sequence loop off
 const NUMERIC_DEFAULTS = {
   MIN_THINKING_WINDOW: 80,
   MAX_THINKING_WINDOW: 2000,
@@ -21,8 +29,9 @@ const NUMERIC_DEFAULTS = {
   FILE_READ_LIMIT: 4,
   SEARCH_EXPAND_LIMIT: 3,
   CONSECUTIVE_LOOP_LIMIT: 2,
-  TOOL_LOOP_BAN: 0, // 0 = block identical call only while repeated back-to-back;
-  //                   1 = ban that exact call for the rest of the session
+  TOOL_LOOP_BAN: 1, // 0 = detector off;
+  //                   1 = block identical call only while repeated back-to-back;
+  //                   2 = ban that exact call for the rest of the session
 };
 
 // Recovery messages injected into the agent when a loop is detected. Edit these
@@ -118,16 +127,19 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("message_update", (event, ctx) => {
+    const charLoopOn = cfg.MIN_THINKING_WINDOW > 0;
+    const semanticLoopOn = cfg.PARA_LOOP_THRESHOLD > 0;
+    if (!charLoopOn && !semanticLoopOn) return;
     if (thinkingAborted || event.message.role !== "assistant") return;
     const thinking = extractThinking(event.message);
     if (!thinking || thinking.length < lastCheckedLen + cfg.CHECK_STRIDE) return;
     lastCheckedLen = thinking.length;
-    if (thinking.length < cfg.MIN_THINKING_WINDOW * 2) return;
+    if (charLoopOn && thinking.length < cfg.MIN_THINKING_WINDOW * 2) return;
 
-    let repeat = detectRepeatingSuffix(thinking);
+    let repeat = charLoopOn ? detectRepeatingSuffix(thinking) : null;
     if (repeat) {
       loopType = "character";
-    } else {
+    } else if (semanticLoopOn) {
       repeat = detectSemanticLoop(thinking);
       if (repeat) loopType = "semantic";
     }
@@ -155,7 +167,7 @@ export default function (pi: ExtensionAPI) {
         ? "[SEMANTIC LOOP — truncated by loop-police]"
         : "[THINKING LOOP — truncated by loop-police]";
       const advice =
-        consecutiveLoopCount >= cfg.CONSECUTIVE_LOOP_LIMIT
+        cfg.CONSECUTIVE_LOOP_LIMIT > 0 && consecutiveLoopCount >= cfg.CONSECUTIVE_LOOP_LIMIT
           ? fmt(cfg.MSG_CONSECUTIVE_LOOP, { count: consecutiveLoopCount })
           : isSemantic
             ? String(cfg.MSG_SEMANTIC_LOOP)
@@ -174,6 +186,7 @@ export default function (pi: ExtensionAPI) {
     consecutiveLoopCount = 0;
 
     // Cross-turn stagnation: only run on clean (non-aborted) turns
+    if (cfg.STAGNATION_WINDOW <= 0) return;
     const thinking = extractThinking(event.message);
     if (thinking) {
       thinkingHistory.push(thinking);
@@ -203,7 +216,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("tool_call", (event, ctx) => {
     // File read repetition
-    if (isReadTool(event.toolName)) {
+    if (cfg.FILE_READ_LIMIT > 0 && isReadTool(event.toolName)) {
       const path = getInputPath(event.input);
       if (path) {
         const count = (fileReadCounts.get(path) ?? 0) + 1;
@@ -224,7 +237,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     // Search expansion spiral
-    if (isSearchTool(event.toolName)) {
+    if (cfg.SEARCH_EXPAND_LIMIT > 0 && isSearchTool(event.toolName)) {
       const pattern = getSearchPattern(event.input);
       if (pattern) {
         const searchPath = getInputPath(event.input) ?? "*";
@@ -249,18 +262,19 @@ export default function (pi: ExtensionAPI) {
     // Tool call sequence loop — block the repeated call *in place* and hand the
     // warning back as the tool result, so the model must pivot within the same
     // turn. No new turn, and other (different) tools are left available.
+    if (cfg.TOOL_LOOP_BAN <= 0) return;
     const hash = hashToolCall(event.toolName, event.input);
 
-    // Permanent-ban mode (TOOL_LOOP_BAN=1): once a call has looped, that exact
+    // Permanent-ban mode (TOOL_LOOP_BAN=2): once a call has looped, that exact
     // call stays blocked for the rest of the session, no matter what.
-    if (cfg.TOOL_LOOP_BAN && bannedCalls.has(hash)) {
+    if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
       ctx.ui.notify(`⚠️ TOOL LOOP: identical call blocked (banned)`, "warning");
       return { block: true, reason: fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 }) };
     }
 
     const windowSize = detectSequenceRepeat([...toolHistory, hash]);
     if (windowSize > 0) {
-      if (cfg.TOOL_LOOP_BAN) bannedCalls.add(hash);
+      if (cfg.TOOL_LOOP_BAN >= 2) bannedCalls.add(hash);
       ctx.ui.notify(`⚠️ TOOL LOOP: ${windowSize}-call sequence repeating — blocked`, "warning");
       // Do NOT record the blocked call: toolHistory stays at the looping state
       // so a renewed identical attempt trips the detector again in place. The
