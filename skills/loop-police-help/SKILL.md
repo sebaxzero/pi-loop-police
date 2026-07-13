@@ -14,6 +14,7 @@ loops in real time before they exhaust your context window.
 
 - **Thinking loop**: thinking block repeating the same phrases verbatim
 - **Semantic loop**: thinking block cycling through the same reasoning steps
+- **Output loop**: visible response text repeating the same content verbatim
 - **Stagnation**: thinking across N turns is 85%+ similar (Jaccard)
 - **File read loop**: same file read ≥ FILE_READ_LIMIT times in one session
 - **Search spiral**: same pattern searched across ≥ SEARCH_EXPAND_LIMIT paths
@@ -32,8 +33,9 @@ loops in real time before they exhaust your context window.
 
 | Key | Default | What it controls |
 |-----|---------|-----------------|
-| `MIN_THINKING_WINDOW` | `80` | Minimum characters before loop detection starts |
-| `MAX_THINKING_WINDOW` | `2000` | Maximum window size for repeating-suffix scan |
+| `MIN_THINKING_WINDOW` | `80` | Minimum characters before thinking loop detection starts |
+| `MAX_THINKING_WINDOW` | `2000` | Maximum window size for repeating-suffix scan (thinking and output) |
+| `MIN_OUTPUT_WINDOW` | `100` | Minimum repeating phrase length flagged in the response text |
 | `CHECK_STRIDE` | `50` | Check every N new characters during streaming |
 | `PARA_MIN_LEN` | `40` | Minimum paragraph length to fingerprint for semantic loop |
 | `PARA_FINGERPRINT_LEN` | `60` | Characters used as paragraph fingerprint |
@@ -45,7 +47,7 @@ loops in real time before they exhaust your context window.
 | `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N thinking-loop aborts in a row (across turns) |
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
 
-Setting a detector's key to `0` disables it: `MIN_THINKING_WINDOW=0` (thinking loop), `PARA_LOOP_THRESHOLD=0` (semantic loop), `STAGNATION_WINDOW=0` (stagnation), `FILE_READ_LIMIT=0` (file read loop), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
+Setting a detector's key to `0` disables it: `MIN_THINKING_WINDOW=0` (thinking loop), `PARA_LOOP_THRESHOLD=0` (semantic loop), `MIN_OUTPUT_WINDOW=0` (output loop), `STAGNATION_WINDOW=0` (stagnation), `FILE_READ_LIMIT=0` (file read loop), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
 
 ## Message templates
 
@@ -57,11 +59,13 @@ settable via `/loop-police set`. `{placeholders}` are filled at runtime:
 |-----|-------------|
 | `MSG_THINKING_LOOP` | — |
 | `MSG_SEMANTIC_LOOP` | — |
+| `MSG_OUTPUT_LOOP` | — |
 | `MSG_CONSECUTIVE_LOOP` | `{count}` |
 | `MSG_STAGNATION` | `{window}` `{threshold}` |
 | `MSG_FILE_READ_LOOP` | `{path}` `{count}` |
 | `MSG_SEARCH_SPIRAL` | `{pattern}` `{paths}` |
 | `MSG_TOOL_LOOP` | `{windowSize}` |
+| `MSG_SUFFIX` | — (appended to every recovery message; empty by default — use it to point the model at an advisor extension/tool on any detection) |
 
 ## Changing config
 

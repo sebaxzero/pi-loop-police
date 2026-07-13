@@ -5,14 +5,15 @@ import assert from "node:assert/strict";
 // Pure logic duplicated from extensions/loop-police.ts — no build step
 const MIN_THINKING_WINDOW = 80;
 const MAX_THINKING_WINDOW = 2000;
+const MIN_OUTPUT_WINDOW = 100;
 const PARA_MIN_LEN = 40;
 const PARA_FINGERPRINT_LEN = 60;
 const PARA_LOOP_THRESHOLD = 3;
 
-function detectRepeatingSuffix(text) {
+function detectRepeatingSuffix(text, minWindow = MIN_THINKING_WINDOW) {
   const n = text.length;
   const limit = Math.min(MAX_THINKING_WINDOW, Math.floor(n / 2));
-  for (let w = MIN_THINKING_WINDOW; w <= limit; w++) {
+  for (let w = minWindow; w <= limit; w++) {
     const tail = text.slice(n - w);
     const prev = text.slice(n - 2 * w, n - w);
     if (prev.length === w && tail === prev) return { cleanPrefix: text.slice(0, n - w) };
@@ -66,6 +67,28 @@ function replaceThinking(message, newText) {
   return { ...message, content };
 }
 
+function extractText(message) {
+  if (!Array.isArray(message?.content)) return null;
+  for (let i = message.content.length - 1; i >= 0; i--) {
+    const block = message.content[i];
+    if (block.type === "text" && typeof block.text === "string") return block.text;
+  }
+  return null;
+}
+
+function replaceText(message, newText) {
+  if (!Array.isArray(message?.content)) return message;
+  let lastIdx = -1;
+  for (let i = 0; i < message.content.length; i++) {
+    if (message.content[i].type === "text") lastIdx = i;
+  }
+  if (lastIdx === -1) return message;
+  const content = message.content.map((block, i) =>
+    i === lastIdx ? { ...block, text: newText } : block
+  );
+  return { ...message, content };
+}
+
 function stableStringify(val) {
   if (val === null || typeof val !== "object") return JSON.stringify(val);
   if (Array.isArray(val)) return `[${val.map(stableStringify).join(",")}]`;
@@ -110,6 +133,12 @@ function fmt(template, vars) {
   return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
     key in vars ? String(vars[key]) : whole
   );
+}
+
+// Mirrors withSuffix in the extension, with cfg.MSG_SUFFIX passed explicitly.
+function withSuffix(msg, suffixCfg) {
+  const suffix = String(suffixCfg ?? "").trim();
+  return suffix ? `${msg}\n\n${suffix}` : msg;
 }
 
 function isReadTool(name) { return /\bread|view|cat\b/i.test(name); }
@@ -210,6 +239,126 @@ describe("detectRepeatingSuffix", () => {
     }
     assert.ok(detected, "loop should be detected before stream ends");
     assert.ok(detectedAt < fullLoop.length, `detection at ${detectedAt} should precede end ${fullLoop.length}`);
+  });
+});
+
+describe("output text loop detection (detectRepeatingSuffix with MIN_OUTPUT_WINDOW)", () => {
+  // Real-world repro: a code-analysis phrase (~250 chars) repeated verbatim in
+  // the visible response — well above MIN_OUTPUT_WINDOW, so the char-level
+  // detector must fire on the output text stream.
+  const PHRASE =
+    "readPersistedSriHashes = try { const cached = await env.CACHE.get(key); return JSON.parse(cached); } catch { return null; } — " +
+    "try (1) + catch (1) + cached (1) + JSON.parse (0) + return null (0) = 3. await = 1. env.CACHE.get = 4. Total = 8. cyc=8. Still. ";
+
+  assert.ok(PHRASE.length > MIN_OUTPUT_WINDOW, "fixture PHRASE must exceed MIN_OUTPUT_WINDOW");
+
+  test("phrase repeated 10x in output → detected", () => {
+    assert.notEqual(detectRepeatingSuffix(PHRASE.repeat(10), MIN_OUTPUT_WINDOW), null);
+  });
+
+  test("detection fires on the second repetition already", () => {
+    assert.notEqual(detectRepeatingSuffix(PHRASE.repeat(2), MIN_OUTPUT_WINDOW), null);
+  });
+
+  test("cleanPrefix trims the trailing repetition", () => {
+    const result = detectRepeatingSuffix(PHRASE + PHRASE, MIN_OUTPUT_WINDOW);
+    assert.equal(result.cleanPrefix, PHRASE);
+  });
+
+  test("newline-separated repetitions are still adjacent → detected", () => {
+    assert.notEqual(detectRepeatingSuffix((PHRASE + "\n").repeat(5), MIN_OUTPUT_WINDOW), null);
+  });
+
+  test("single occurrence → no detection", () => {
+    assert.equal(detectRepeatingSuffix(PHRASE, MIN_OUTPUT_WINDOW), null);
+  });
+
+  test("output window is stricter than thinking window (80 < unit < 100 not flagged)", () => {
+    const short = "This sentence is over eighty characters long but it stays under one hundred, yes sir!! "; // 87 chars
+    assert.ok(short.length > MIN_THINKING_WINDOW && short.length < MIN_OUTPUT_WINDOW);
+    assert.equal(detectRepeatingSuffix(short + short, MIN_OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix(short + short, MIN_THINKING_WINDOW), null);
+  });
+
+  test("unit shorter than MIN_OUTPUT_WINDOW still caught once the run is long enough", () => {
+    // Real-world repro: "crap > cyc + cog + ..." (67 chars) repeated inline.
+    // A single unit is below the 100-char window, but a window of two units
+    // (134 chars) also repeats adjacently, so the scan still catches it.
+    const unit = "crap > cyc + cog + loc + coupling + complexity + maintainability = ";
+    assert.ok(unit.length < MIN_OUTPUT_WINDOW);
+    assert.equal(detectRepeatingSuffix(unit.repeat(2), MIN_OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix(unit.repeat(4), MIN_OUTPUT_WINDOW), null);
+  });
+
+  test("near-identical (but not verbatim) attempts do not trigger", () => {
+    // Different decomposition attempts of the same function are legitimate
+    // reasoning, not a loop — only verbatim adjacent repetition fires.
+    const attempts = [
+      "readPersistedSriHashes with && guard: try (1) + catch (1) + cached (1) + && (1) + JSON.parse (1) = 5. Total = 10. Still.",
+      "readPersistedSriHashes with if guard: try (1) + catch (1) + cached (1) + if (1) = 4. Total = 9. cyc=9. Still.",
+      "readPersistedSriHashes bare: try (1) + catch (1) + cached (1) = 3. Total = 8. cyc=8. Still.",
+    ].join("\n\n");
+    assert.equal(detectRepeatingSuffix(attempts, MIN_OUTPUT_WINDOW), null);
+  });
+
+  test("streaming simulation: output loop fires before stream ends", () => {
+    const fullLoop = PHRASE.repeat(10);
+    const CHECK_STRIDE = 50;
+    let detectedAt = -1;
+    for (let i = CHECK_STRIDE; i <= fullLoop.length; i += CHECK_STRIDE) {
+      const chunk = fullLoop.slice(0, i);
+      if (chunk.length < MIN_OUTPUT_WINDOW * 2) continue;
+      if (detectRepeatingSuffix(chunk, MIN_OUTPUT_WINDOW)) { detectedAt = i; break; }
+    }
+    assert.ok(detectedAt > 0, "output loop should be detected mid-stream");
+    assert.ok(detectedAt < fullLoop.length, `detection at ${detectedAt} should precede end ${fullLoop.length}`);
+  });
+});
+
+describe("extractText", () => {
+  test("returns text block content", () => {
+    assert.equal(
+      extractText({ role: "assistant", content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "response" }] }),
+      "response"
+    );
+  });
+  test("returns the LAST text block (the one streaming)", () => {
+    assert.equal(
+      extractText({ role: "assistant", content: [{ type: "text", text: "first" }, { type: "toolCall" }, { type: "text", text: "second" }] }),
+      "second"
+    );
+  });
+  test("null when no text block", () => {
+    assert.equal(extractText({ role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] }), null);
+  });
+  test("null for string content", () => assert.equal(extractText({ role: "user", content: "text" }), null));
+  test("null for null", () => assert.equal(extractText(null), null));
+});
+
+describe("replaceText", () => {
+  test("replaces the last text block, leaves others", () => {
+    const msg = { role: "assistant", content: [{ type: "text", text: "first" }, { type: "text", text: "looping" }] };
+    const result = replaceText(msg, "truncated [OUTPUT LOOP]");
+    assert.equal(result.content[0].text, "first");
+    assert.equal(result.content[1].text, "truncated [OUTPUT LOOP]");
+  });
+
+  test("leaves thinking blocks untouched", () => {
+    const msg = { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "looping" }] };
+    const result = replaceText(msg, "cut");
+    assert.equal(result.content[0].thinking, "hmm");
+    assert.equal(result.content[1].text, "cut");
+  });
+
+  test("does not mutate original", () => {
+    const msg = { role: "assistant", content: [{ type: "text", text: "original" }] };
+    replaceText(msg, "new");
+    assert.equal(msg.content[0].text, "original");
+  });
+
+  test("message without text blocks returned unchanged", () => {
+    const msg = { role: "assistant", content: [{ type: "thinking", thinking: "hmm" }] };
+    assert.equal(replaceText(msg, "new"), msg);
   });
 });
 
@@ -474,6 +623,31 @@ describe("stagnation detection", () => {
     const diff = "Let me try something completely new and approach the problem from a totally different angle.";
     // After stagnation is detected and history is cleared, 1 new turn is not stagnant
     assert.ok(!isStagnant([diff], WINDOW, THRESHOLD));
+  });
+});
+
+describe("withSuffix (MSG_SUFFIX appended to every recovery message)", () => {
+  test("empty suffix (default) → message unchanged", () => {
+    assert.equal(withSuffix("⚠️ LOOP", ""), "⚠️ LOOP");
+  });
+
+  test("missing suffix (undefined) → message unchanged", () => {
+    assert.equal(withSuffix("⚠️ LOOP", undefined), "⚠️ LOOP");
+  });
+
+  test("whitespace-only suffix → message unchanged", () => {
+    assert.equal(withSuffix("⚠️ LOOP", "   \n "), "⚠️ LOOP");
+  });
+
+  test("non-empty suffix appended after a blank line", () => {
+    assert.equal(
+      withSuffix("⚠️ LOOP", "Consult the advisor: run /advisor before continuing."),
+      "⚠️ LOOP\n\nConsult the advisor: run /advisor before continuing."
+    );
+  });
+
+  test("suffix is trimmed before appending", () => {
+    assert.equal(withSuffix("⚠️ LOOP", "  use /advisor  "), "⚠️ LOOP\n\nuse /advisor");
   });
 });
 

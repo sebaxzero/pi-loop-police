@@ -5,12 +5,13 @@
 
 A [pi](https://pi.dev) extension that detects and breaks infinite loops in real time — before they waste your context window.
 
-Small reasoning models (Qwen, DeepSeek, etc.) are prone to two kinds of loops:
+Small reasoning models (Qwen, DeepSeek, etc.) are prone to three kinds of loops:
 
 1. **Thinking block loop** — the model repeats the same phrases inside its `<think>` block over and over until the thinking quota is exhausted.
-2. **Tool call loop** — the model calls the same sequence of tools identically across turns, cycling indefinitely until the global context runs out.
+2. **Output text loop** — the same thing in the visible response: the model repeats a phrase or block verbatim in the answer itself, outside the thinking block.
+3. **Tool call loop** — the model calls the same sequence of tools identically across turns, cycling indefinitely until the global context runs out.
 
-Loop Police catches both **mid-stream** (not after the fact), aborts the looping output, trims it from context, and injects a recovery message so the model can continue with a fresh perspective.
+Loop Police catches them **mid-stream** (not after the fact), aborts the looping output, trims it from context, and injects a recovery message so the model can continue with a fresh perspective.
 
 ## Install
 
@@ -41,6 +42,10 @@ On match (either layer):
 - `ctx.abort()` stops the stream immediately.
 - `message_end` trims the repeated portion and replaces it with `[THINKING LOOP — truncated by loop-police]` or `[SEMANTIC LOOP — truncated by loop-police]`.
 - A recovery message is injected into context and triggers a new turn.
+
+### Output text loop detection (mid-stream)
+
+The same character-level check runs on the **visible response text** (the `text` content blocks) as it streams, with its own minimum window (`MIN_OUTPUT_WINDOW`, default 100 — slightly stricter than thinking, since answers legitimately contain more structure). When the last ≥ 100 characters of the response repeat verbatim immediately before themselves, the stream is aborted, the repeated portion is replaced with `[OUTPUT LOOP — truncated by loop-police]`, and a recovery message (`MSG_OUTPUT_LOOP`) triggers a new turn.
 
 ### Cross-turn reasoning stagnation
 
@@ -84,8 +89,9 @@ Persistent configuration lives in `extensions/loop-police.json` (auto-created on
 Defaults:
 
 ```typescript
-MIN_THINKING_WINDOW: 80     // shortest repeating phrase to flag (chars)
-MAX_THINKING_WINDOW: 2000   // longest phrase checked
+MIN_THINKING_WINDOW: 80     // shortest repeating phrase to flag in thinking (chars)
+MAX_THINKING_WINDOW: 2000   // longest phrase checked (thinking and output)
+MIN_OUTPUT_WINDOW: 100      // shortest repeating phrase to flag in the response text
 CHECK_STRIDE: 50            // re-run detection every N new streamed chars
 PARA_MIN_LEN: 40            // shortest paragraph to fingerprint
 PARA_FINGERPRINT_LEN: 60    // chars used as paragraph identity key
@@ -100,7 +106,7 @@ TOOL_LOOP_BAN: 1            // 0 = off
                             // 2 = ban that exact call for the rest of the session
 ```
 
-Increase `MIN_THINKING_WINDOW` or `PARA_LOOP_THRESHOLD` if you get false positives on thinking loops. Increase `FILE_READ_LIMIT` for projects where legitimately re-reading files is common.
+Increase `MIN_THINKING_WINDOW` or `PARA_LOOP_THRESHOLD` if you get false positives on thinking loops. Increase `MIN_OUTPUT_WINDOW` (or set it to `0`) if your responses legitimately contain long verbatim repetition — e.g. generated code with identical adjacent blocks. Increase `FILE_READ_LIMIT` for projects where legitimately re-reading files is common.
 
 ### Disabling individual detectors
 
@@ -110,6 +116,7 @@ Setting a detector's key to `0` turns that detector off entirely:
 |---------|----------|
 | `MIN_THINKING_WINDOW=0` | character-level thinking loop |
 | `PARA_LOOP_THRESHOLD=0` | semantic (paragraph) loop |
+| `MIN_OUTPUT_WINDOW=0` | output text loop |
 | `STAGNATION_WINDOW=0` | cross-turn stagnation |
 | `FILE_READ_LIMIT=0` | file read loop |
 | `SEARCH_EXPAND_LIMIT=0` | search expansion spiral |
@@ -124,13 +131,23 @@ The text injected when a loop is detected is configurable — some models respon
 |-----|-----------|--------------|
 | `MSG_THINKING_LOOP` | character-level thinking loop | — |
 | `MSG_SEMANTIC_LOOP` | semantic (paragraph) thinking loop | — |
+| `MSG_OUTPUT_LOOP` | character-level loop in the response text | — |
 | `MSG_CONSECUTIVE_LOOP` | `CONSECUTIVE_LOOP_LIMIT` looped turns in a row | `{count}` |
 | `MSG_STAGNATION` | cross-turn reasoning stagnation | `{window}` `{threshold}` |
 | `MSG_FILE_READ_LOOP` | same file read too many times | `{path}` `{count}` |
 | `MSG_SEARCH_SPIRAL` | search pattern spread across too many paths | `{pattern}` `{paths}` |
 | `MSG_TOOL_LOOP` | identical tool-call sequence repeating | `{windowSize}` |
+| `MSG_SUFFIX` | appended to **every** message above (empty by default) | — |
 
 `{placeholder}` tokens are substituted at runtime; unknown tokens are left as-is so a typo stays visible. Messages are edited in `loop-police.json` only — `/loop-police set` handles numeric keys and will refuse a `MSG_*` key.
+
+`MSG_SUFFIX` is for instructions that should ride along with every detection without rewriting each template — the typical use is pointing the model at an advisor extension or tool to consult once a loop is caught:
+
+```json
+{
+  "MSG_SUFFIX": "Before continuing, consult the advisor extension: run /advisor with a one-line summary of what you were stuck on."
+}
+```
 
 ## Skills
 

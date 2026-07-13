@@ -12,6 +12,7 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 // Setting a detector's key to 0 disables that detector entirely:
 //   MIN_THINKING_WINDOW=0    → character-level thinking loop off
 //   PARA_LOOP_THRESHOLD=0    → semantic loop off
+//   MIN_OUTPUT_WINDOW=0      → output text loop off
 //   STAGNATION_WINDOW=0      → cross-turn stagnation off
 //   FILE_READ_LIMIT=0        → file read loop off
 //   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
@@ -20,6 +21,7 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 const NUMERIC_DEFAULTS = {
   MIN_THINKING_WINDOW: 80,
   MAX_THINKING_WINDOW: 2000,
+  MIN_OUTPUT_WINDOW: 100,
   CHECK_STRIDE: 50,
   PARA_MIN_LEN: 40,
   PARA_FINGERPRINT_LEN: 60,
@@ -42,13 +44,18 @@ const NUMERIC_DEFAULTS = {
 //   MSG_FILE_READ_LOOP   → {path} {count}
 //   MSG_SEARCH_SPIRAL    → {pattern} {paths}
 //   MSG_TOOL_LOOP        → {windowSize}
+// MSG_SUFFIX, when non-empty, is appended (after a blank line) to EVERY
+// recovery message — use it to point the model at an advisor, e.g.
+// "Consult the advisor extension: run /advisor before continuing."
 const MESSAGE_DEFAULTS = {
   MSG_THINKING_LOOP:
     "⚠️ THINKING LOOP DETECTED: Your thinking block was repeating the same phrases verbatim and has been truncated. Re-examine your approach and continue with the task.",
   MSG_SEMANTIC_LOOP:
     "⚠️ SEMANTIC LOOP DETECTED: Your thinking block was cycling through the same reasoning steps repeatedly. The repeated section has been truncated. Step back and try a completely different approach.",
+  MSG_OUTPUT_LOOP:
+    "⚠️ OUTPUT LOOP DETECTED: Your response text was repeating the same content verbatim and has been truncated. Do NOT re-emit the repeated content — continue from where the response was cut, or wrap up with a concise conclusion.",
   MSG_CONSECUTIVE_LOOP:
-    "⚠️ CONSECUTIVE LOOP ({count}x): You have entered a thinking loop {count} times in a row and loop-police has aborted your thinking each time. Stop thinking now — provide a direct answer or ask for clarification.",
+    "⚠️ CONSECUTIVE LOOP ({count}x): You have entered a loop {count} times in a row and loop-police has aborted your output each time. Stop — provide a direct, concise answer or ask for clarification.",
   MSG_STAGNATION:
     "⚠️ REASONING STAGNATION: Your thinking across the last {window} turns has been {threshold}%+ similar — you are not making progress. Stop and try a fundamentally different approach.",
   MSG_FILE_READ_LOOP:
@@ -57,6 +64,7 @@ const MESSAGE_DEFAULTS = {
     '⚠️ SEARCH EXPANSION SPIRAL: Pattern "{pattern}" has been searched in {paths} different locations. Broadening the scope further will not help — reconsider what you are looking for.',
   MSG_TOOL_LOOP:
     "⚠️ TOOL CALL LOOP: The same sequence of {windowSize} tool call(s) is repeating identically and has been blocked — this exact call did NOT run and will keep being blocked if you repeat it. It produced no new result last time and won't now. Change your approach: try a different command, or use what you already learned to move forward.",
+  MSG_SUFFIX: "",
 };
 
 const DEFAULTS = { ...NUMERIC_DEFAULTS, ...MESSAGE_DEFAULTS };
@@ -102,10 +110,11 @@ const cfg: typeof DEFAULTS & Record<string, number | string> = (() => {
 })();
 
 export default function (pi: ExtensionAPI) {
-  let thinkingAborted = false;
-  let cleanThinkingPrefix: string | null = null;
+  let streamAborted = false;
+  let cleanStreamPrefix: string | null = null;
   let lastCheckedLen = 0;
-  let loopType: "character" | "semantic" = "character";
+  let lastCheckedOutputLen = 0;
+  let loopType: "character" | "semantic" | "output" = "character";
   let toolHistory: string[] = [];
   let bannedCalls = new Set<string>();
   let thinkingHistory: string[] = [];
@@ -114,9 +123,10 @@ export default function (pi: ExtensionAPI) {
   let consecutiveLoopCount = 0;
 
   function reset() {
-    thinkingAborted = false;
-    cleanThinkingPrefix = null;
+    streamAborted = false;
+    cleanStreamPrefix = null;
     lastCheckedLen = 0;
+    lastCheckedOutputLen = 0;
     loopType = "character";
     toolHistory = [];
     bannedCalls = new Set();
@@ -130,8 +140,9 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("turn_start", () => {
     lastCheckedLen = 0;
-    thinkingAborted = false;
-    cleanThinkingPrefix = null;
+    lastCheckedOutputLen = 0;
+    streamAborted = false;
+    cleanStreamPrefix = null;
     loopType = "character";
     // NOTE: consecutiveLoopCount is intentionally NOT reset here. Recovery
     // turns fire turn_start, so resetting would defeat cross-turn escalation.
@@ -139,56 +150,88 @@ export default function (pi: ExtensionAPI) {
     // toolHistory / bannedCalls also persist across turns (reset on agent_start).
   });
 
+  // Only aborts here; message_end decides which recovery message to send
+  // (escalated vs. normal) so a single turn is triggered, not two.
+  function abortStream(cleanPrefix: string, ctx: { abort(): void }) {
+    streamAborted = true;
+    cleanStreamPrefix = cleanPrefix;
+    consecutiveLoopCount++;
+    ctx.abort();
+  }
+
   pi.on("message_update", (event, ctx) => {
+    if (streamAborted || event.message.role !== "assistant") return;
+
+    // Thinking block loops: character-level + semantic
     const charLoopOn = cfg.MIN_THINKING_WINDOW > 0;
     const semanticLoopOn = cfg.PARA_LOOP_THRESHOLD > 0;
-    if (!charLoopOn && !semanticLoopOn) return;
-    if (thinkingAborted || event.message.role !== "assistant") return;
-    const thinking = extractThinking(event.message);
-    if (!thinking || thinking.length < lastCheckedLen + cfg.CHECK_STRIDE) return;
-    lastCheckedLen = thinking.length;
-    if (charLoopOn && thinking.length < cfg.MIN_THINKING_WINDOW * 2) return;
-
-    let repeat = charLoopOn ? detectRepeatingSuffix(thinking) : null;
-    if (repeat) {
-      loopType = "character";
-    } else if (semanticLoopOn) {
-      repeat = detectSemanticLoop(thinking);
-      if (repeat) loopType = "semantic";
+    if (charLoopOn || semanticLoopOn) {
+      const thinking = extractThinking(event.message);
+      if (thinking && thinking.length >= lastCheckedLen + cfg.CHECK_STRIDE) {
+        lastCheckedLen = thinking.length;
+        if (!charLoopOn || thinking.length >= cfg.MIN_THINKING_WINDOW * 2) {
+          let repeat = charLoopOn
+            ? detectRepeatingSuffix(thinking, cfg.MIN_THINKING_WINDOW)
+            : null;
+          if (repeat) {
+            loopType = "character";
+          } else if (semanticLoopOn) {
+            repeat = detectSemanticLoop(thinking);
+            if (repeat) loopType = "semantic";
+          }
+          if (repeat) return abortStream(repeat.cleanPrefix, ctx);
+        }
+      }
     }
-    if (!repeat) return;
 
-    thinkingAborted = true;
-    cleanThinkingPrefix = repeat.cleanPrefix;
-    consecutiveLoopCount++;
-    // Only abort here; message_end decides which recovery message to send
-    // (escalated vs. normal) so a single turn is triggered, not two.
-    ctx.abort();
+    // Output text loop: character-level on the visible response (text blocks
+    // stream too — a phrase repeating verbatim outside the thinking block).
+    if (cfg.MIN_OUTPUT_WINDOW > 0) {
+      const output = extractText(event.message);
+      if (output && output.length >= lastCheckedOutputLen + cfg.CHECK_STRIDE) {
+        lastCheckedOutputLen = output.length;
+        if (output.length >= cfg.MIN_OUTPUT_WINDOW * 2) {
+          const repeat = detectRepeatingSuffix(output, cfg.MIN_OUTPUT_WINDOW);
+          if (repeat) {
+            loopType = "output";
+            abortStream(repeat.cleanPrefix, ctx);
+          }
+        }
+      }
+    }
   });
 
   pi.on("message_end", (event, _ctx) => {
     if (event.message.role !== "assistant") return;
 
-    if (thinkingAborted) {
-      const prefix = cleanThinkingPrefix ?? "";
-      thinkingAborted = false;
-      cleanThinkingPrefix = null;
+    if (streamAborted) {
+      const prefix = cleanStreamPrefix ?? "";
+      streamAborted = false;
+      cleanStreamPrefix = null;
       lastCheckedLen = 0;
+      lastCheckedOutputLen = 0;
 
-      const isSemantic = loopType === "semantic";
-      const label = isSemantic
-        ? "[SEMANTIC LOOP — truncated by loop-police]"
-        : "[THINKING LOOP — truncated by loop-police]";
+      const label =
+        loopType === "output"
+          ? "[OUTPUT LOOP — truncated by loop-police]"
+          : loopType === "semantic"
+            ? "[SEMANTIC LOOP — truncated by loop-police]"
+            : "[THINKING LOOP — truncated by loop-police]";
       const advice =
         cfg.CONSECUTIVE_LOOP_LIMIT > 0 && consecutiveLoopCount >= cfg.CONSECUTIVE_LOOP_LIMIT
           ? fmt(cfg.MSG_CONSECUTIVE_LOOP, { count: consecutiveLoopCount })
-          : isSemantic
-            ? String(cfg.MSG_SEMANTIC_LOOP)
-            : String(cfg.MSG_THINKING_LOOP);
+          : loopType === "output"
+            ? String(cfg.MSG_OUTPUT_LOOP)
+            : loopType === "semantic"
+              ? String(cfg.MSG_SEMANTIC_LOOP)
+              : String(cfg.MSG_THINKING_LOOP);
 
-      const cleaned = replaceThinking(event.message, `${prefix}\n\n${label}`);
+      const cleaned =
+        loopType === "output"
+          ? replaceText(event.message, `${prefix}\n\n${label}`)
+          : replaceThinking(event.message, `${prefix}\n\n${label}`);
       pi.sendMessage(
-        { customType: "loop-police", content: advice, display: true },
+        { customType: "loop-police", content: withSuffix(advice), display: true },
         { triggerTurn: true }
       );
       return { message: cleaned };
@@ -214,10 +257,12 @@ export default function (pi: ExtensionAPI) {
           pi.sendMessage(
             {
               customType: "loop-police",
-              content: fmt(cfg.MSG_STAGNATION, {
-                window: cfg.STAGNATION_WINDOW,
-                threshold: Math.round(cfg.STAGNATION_THRESHOLD * 100),
-              }),
+              content: withSuffix(
+                fmt(cfg.MSG_STAGNATION, {
+                  window: cfg.STAGNATION_WINDOW,
+                  threshold: Math.round(cfg.STAGNATION_THRESHOLD * 100),
+                })
+              ),
               display: true,
             },
             { triggerTurn: true }
@@ -239,7 +284,7 @@ export default function (pi: ExtensionAPI) {
           pi.sendMessage(
             {
               customType: "loop-police",
-              content: fmt(cfg.MSG_FILE_READ_LOOP, { path, count }),
+              content: withSuffix(fmt(cfg.MSG_FILE_READ_LOOP, { path, count })),
               display: true,
             },
             { triggerTurn: true }
@@ -262,7 +307,7 @@ export default function (pi: ExtensionAPI) {
           pi.sendMessage(
             {
               customType: "loop-police",
-              content: fmt(cfg.MSG_SEARCH_SPIRAL, { pattern, paths: paths.size }),
+              content: withSuffix(fmt(cfg.MSG_SEARCH_SPIRAL, { pattern, paths: paths.size })),
               display: true,
             },
             { triggerTurn: true }
@@ -282,7 +327,7 @@ export default function (pi: ExtensionAPI) {
     // call stays blocked for the rest of the session, no matter what.
     if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
       ctx.ui.notify(`⚠️ TOOL LOOP: identical call blocked (banned)`, "warning");
-      return { block: true, reason: fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 }) };
+      return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 })) };
     }
 
     const windowSize = detectSequenceRepeat([...toolHistory, hash]);
@@ -293,7 +338,7 @@ export default function (pi: ExtensionAPI) {
       // so a renewed identical attempt trips the detector again in place. The
       // moment the model does something different, adjacency breaks and the
       // call is allowed again (safe for build/test/lint re-runs).
-      return { block: true, reason: fmt(cfg.MSG_TOOL_LOOP, { windowSize }) };
+      return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize })) };
     }
 
     toolHistory.push(hash);
@@ -323,7 +368,7 @@ export default function (pi: ExtensionAPI) {
       ctx.ui.notify(
         [
           "Loop Police status",
-          `  thinking aborted:    ${thinkingAborted}`,
+          `  stream aborted:      ${streamAborted}`,
           `  tool history:        ${toolHistory.length} calls`,
           `  banned calls:        ${bannedCalls.size}`,
           `  stagnation history:  ${thinkingHistory.length}/${cfg.STAGNATION_WINDOW} turns`,
@@ -355,6 +400,14 @@ function fmt(template: string | number, vars: Record<string, string | number>): 
   return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
     key in vars ? String(vars[key]) : whole
   );
+}
+
+// Append MSG_SUFFIX (if configured) to a recovery message. Every detector's
+// message passes through here, so one JSON key adds advisor instructions to
+// all of them without rewriting each MSG_* template.
+function withSuffix(msg: string): string {
+  const suffix = String(cfg.MSG_SUFFIX ?? "").trim();
+  return suffix ? `${msg}\n\n${suffix}` : msg;
 }
 
 // Parse and apply a single "KEY=VAL" assignment against `target`, mutating it
@@ -426,6 +479,30 @@ function extractThinking(message: any): string | null {
   return null;
 }
 
+// Output text helpers target the LAST text block: streaming always appends to
+// the newest block, so that is the one that can be looping.
+function extractText(message: any): string | null {
+  if (!Array.isArray(message?.content)) return null;
+  for (let i = message.content.length - 1; i >= 0; i--) {
+    const block = message.content[i];
+    if (block.type === "text" && typeof block.text === "string") return block.text;
+  }
+  return null;
+}
+
+function replaceText(message: any, newText: string): any {
+  if (!Array.isArray(message?.content)) return message;
+  let lastIdx = -1;
+  for (let i = 0; i < message.content.length; i++) {
+    if (message.content[i].type === "text") lastIdx = i;
+  }
+  if (lastIdx === -1) return message;
+  const content = message.content.map((block: any, i: number) =>
+    i === lastIdx ? { ...block, text: newText } : block
+  );
+  return { ...message, content };
+}
+
 function replaceThinking(message: any, newText: string): any {
   if (!Array.isArray(message?.content)) return message;
   let done = false;
@@ -457,10 +534,12 @@ function detectSemanticLoop(text: string): { cleanPrefix: string } | null {
   return null;
 }
 
-function detectRepeatingSuffix(text: string): { cleanPrefix: string } | null {
+// minWindow is MIN_THINKING_WINDOW for thinking blocks, MIN_OUTPUT_WINDOW for
+// output text; MAX_THINKING_WINDOW caps the repeating unit length for both.
+function detectRepeatingSuffix(text: string, minWindow: number): { cleanPrefix: string } | null {
   const n = text.length;
   const limit = Math.min(cfg.MAX_THINKING_WINDOW, Math.floor(n / 2));
-  for (let w = cfg.MIN_THINKING_WINDOW; w <= limit; w++) {
+  for (let w = minWindow; w <= limit; w++) {
     const tail = text.slice(n - w);
     const prev = text.slice(n - 2 * w, n - w);
     if (prev.length === w && tail === prev) {

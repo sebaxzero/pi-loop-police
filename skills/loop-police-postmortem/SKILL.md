@@ -22,6 +22,7 @@ leaves a distinct trace:
 |----------|---------------------|
 | Thinking loop (character) | assistant thinking ending in `[THINKING LOOP — truncated by loop-police]` + a warning message starting `⚠️ THINKING LOOP DETECTED` |
 | Semantic loop | thinking ending in `[SEMANTIC LOOP — truncated by loop-police]` + `⚠️ SEMANTIC LOOP DETECTED` |
+| Output loop | assistant response text ending in `[OUTPUT LOOP — truncated by loop-police]` + `⚠️ OUTPUT LOOP DETECTED` |
 | Consecutive loop (escalation) | `⚠️ CONSECUTIVE LOOP ({count}x)` warning |
 | Stagnation | `⚠️ REASONING STAGNATION` warning |
 | File read loop | blocked tool call whose result/reason contains `loop-police: file read {count}x — {path}` + `⚠️ FILE READ LOOP` warning |
@@ -41,11 +42,12 @@ extension file — check, in order:
 4. The same three paths under the project's `./.pi/agent/` (local install)
 
 If none is readable, use the defaults: `MIN_THINKING_WINDOW=80`,
-`MAX_THINKING_WINDOW=2000`, `CHECK_STRIDE=50`, `PARA_MIN_LEN=40`,
+`MAX_THINKING_WINDOW=2000`, `MIN_OUTPUT_WINDOW=100`, `CHECK_STRIDE=50`,
+`PARA_MIN_LEN=40`,
 `PARA_FINGERPRINT_LEN=60`, `PARA_LOOP_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
 `STAGNATION_THRESHOLD=0.85`, `FILE_READ_LIMIT=4`, `SEARCH_EXPAND_LIMIT=3`,
 `CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`. A value of `0` on
-`MIN_THINKING_WINDOW`, `PARA_LOOP_THRESHOLD`, `STAGNATION_WINDOW`,
+`MIN_THINKING_WINDOW`, `PARA_LOOP_THRESHOLD`, `MIN_OUTPUT_WINDOW`, `STAGNATION_WINDOW`,
 `FILE_READ_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT` or
 `TOOL_LOOP_BAN` means that detector is disabled — a disabled detector cannot
 have fired, so skip it. Keep in mind the session may
@@ -103,6 +105,9 @@ Evidence patterns for **false positives**, per detector:
 - **Character thinking loop**: repeated boilerplate the model quotes
   verbatim more than once (code blocks, error messages, long identifiers) —
   rare at the default 80-char window, plausible below it.
+- **Output loop**: the response legitimately contained long verbatim
+  repetition — generated code with identical adjacent blocks, or the user
+  explicitly asked for repeated content.
 - **Stagnation**: a genuinely repetitive batch task (applying the same
   change to N files) where similar thinking across turns *is* progress.
 
@@ -118,6 +123,7 @@ Map each non-justified verdict to a config change:
 | Tool loop ineffective (model keeps re-issuing the blocked call) | `TOOL_LOOP_BAN=2` |
 | Semantic FP | raise `PARA_LOOP_THRESHOLD` (3 → 4–5) and/or `PARA_FINGERPRINT_LEN` (60 → 100); raise `PARA_MIN_LEN` if short bullets collided |
 | Character FP | raise `MIN_THINKING_WINDOW` (80 → 120–160) |
+| Output loop FP | raise `MIN_OUTPUT_WINDOW` (100 → 200–400); `MIN_OUTPUT_WINDOW=0` only if the user explicitly wants it off |
 | Stagnation FP | raise `STAGNATION_THRESHOLD` (0.85 → 0.90–0.95) or `STAGNATION_WINDOW` (4 → 6) |
 | Thinking loop ineffective / `CONSECUTIVE LOOP` seen | reword `MSG_THINKING_LOOP` / `MSG_SEMANTIC_LOOP` for this model (shorter, more imperative, name the alternative action); or lower `CONSECUTIVE_LOOP_LIMIT` to escalate sooner |
 | Loops detected *late* (long truncated prefix already wasted) | lower `MIN_THINKING_WINDOW`, or lower `PARA_LOOP_THRESHOLD` if the semantic layer caught what the character layer missed |
