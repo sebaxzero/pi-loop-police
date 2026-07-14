@@ -3,40 +3,68 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 
 // Pure logic duplicated from extensions/loop-police.ts — no build step
-const MIN_THINKING_WINDOW = 80;
-const MAX_THINKING_WINDOW = 2000;
-const MIN_OUTPUT_WINDOW = 100;
+const THINKING_WINDOW = 80;
+const OUTPUT_WINDOW = 100;
+const MAX_WINDOW = 4000;
 const PARA_MIN_LEN = 40;
-const PARA_FINGERPRINT_LEN = 60;
-const PARA_LOOP_THRESHOLD = 3;
+const FINGERPRINT_LEN = 60;
+const SEMANTIC_THRESHOLD = 3;
 
-function detectRepeatingSuffix(text, minWindow = MIN_THINKING_WINDOW) {
+function zArray(s) {
+  const n = s.length;
+  const z = new Int32Array(n);
+  if (n === 0) return z;
+  z[0] = n;
+  for (let i = 1, l = 0, r = 0; i < n; i++) {
+    if (i < r) z[i] = Math.min(r - i, z[i - l]);
+    while (i + z[i] < n && s.charCodeAt(z[i]) === s.charCodeAt(i + z[i])) z[i]++;
+    if (i + z[i] > r) { l = i; r = i + z[i]; }
+  }
+  return z;
+}
+
+function detectRepeatingSuffix(text, minWindow = THINKING_WINDOW) {
   const n = text.length;
-  const limit = Math.min(MAX_THINKING_WINDOW, Math.floor(n / 2));
-  for (let w = minWindow; w <= limit; w++) {
-    const tail = text.slice(n - w);
-    const prev = text.slice(n - 2 * w, n - w);
-    if (prev.length === w && tail === prev) return { cleanPrefix: text.slice(0, n - w) };
+  const maxW = Math.min(MAX_WINDOW, Math.floor(n / 2));
+  if (minWindow <= 0 || maxW < minWindow) return null;
+  const tail = text.slice(Math.max(0, n - 2 * maxW));
+  const z = zArray(tail.split("").reverse().join(""));
+  for (let w = minWindow; w <= maxW; w++) {
+    if (z[w] >= w) return { cleanPrefix: text.slice(0, n - w) };
   }
   return null;
 }
 
-function detectSemanticLoop(text) {
-  const counts = new Map();
-  let searchFrom = 0;
-  for (const para of text.split(/\n\n+/)) {
-    const paraStart = text.indexOf(para, searchFrom);
-    if (paraStart === -1) continue;
-    searchFrom = paraStart + para.length;
-    const trimmed = para.trim();
-    if (trimmed.length >= PARA_MIN_LEN) {
-      const key = trimmed.slice(0, PARA_FINGERPRINT_LEN);
-      const count = (counts.get(key) ?? 0) + 1;
-      counts.set(key, count);
-      if (count >= PARA_LOOP_THRESHOLD) return { cleanPrefix: text.slice(0, paraStart) };
+function newSemanticState() {
+  return { counts: new Map(), scanned: 0, inFence: false };
+}
+
+function detectSemanticLoop(text, state) {
+  const s = state ?? newSemanticState();
+  const delim = /\n\n+/g;
+  delim.lastIndex = s.scanned;
+  let pos = s.scanned;
+  let inFence = s.inFence;
+  for (;;) {
+    const m = delim.exec(text);
+    const end = m ? m.index : text.length;
+    const para = text.slice(pos, end);
+    const fenceMarks = (para.match(/```/g) ?? []).length;
+    if (!inFence && fenceMarks === 0) {
+      const trimmed = para.trim();
+      if (trimmed.length >= PARA_MIN_LEN) {
+        const key = trimmed.slice(0, FINGERPRINT_LEN);
+        const count = (s.counts.get(key) ?? 0) + 1;
+        if (count >= SEMANTIC_THRESHOLD) return { cleanPrefix: text.slice(0, pos) };
+        if (m) s.counts.set(key, count);
+      }
     }
+    if (!m) return null;
+    if (fenceMarks % 2 === 1) inFence = !inFence;
+    pos = delim.lastIndex;
+    s.scanned = pos;
+    s.inFence = inFence;
   }
-  return null;
 }
 
 function detectSequenceRepeat(history) {
@@ -140,6 +168,26 @@ function migrateToolLoopBan(fromFile) {
   return old + 1;
 }
 
+const RENAMED_KEYS = {
+  MIN_THINKING_WINDOW: { to: "THINKING_WINDOW", oldDefault: 80 },
+  MIN_OUTPUT_WINDOW: { to: "OUTPUT_WINDOW", oldDefault: 100 },
+  MAX_THINKING_WINDOW: { to: "MAX_WINDOW", oldDefault: 2000 },
+  CHECK_STRIDE: { to: "STRIDE", oldDefault: 50 },
+  PARA_FINGERPRINT_LEN: { to: "FINGERPRINT_LEN", oldDefault: 60 },
+  PARA_LOOP_THRESHOLD: { to: "SEMANTIC_THRESHOLD", oldDefault: 3 },
+};
+
+function migrateRenamedKeys(fromFile) {
+  const out = {};
+  if (!fromFile || (typeof fromFile.CONFIG_VERSION === "number" && fromFile.CONFIG_VERSION >= 3))
+    return out;
+  for (const [oldKey, { to, oldDefault }] of Object.entries(RENAMED_KEYS)) {
+    const val = fromFile[oldKey];
+    if (typeof val === "number" && val !== oldDefault && !(to in fromFile)) out[to] = val;
+  }
+  return out;
+}
+
 function fmt(template, vars) {
   return String(template).replace(/\{(\w+)\}/g, (whole, key) =>
     key in vars ? String(vars[key]) : whole
@@ -173,16 +221,16 @@ function isStagnant(history, window, threshold) {
 }
 
 // ---------------------------------------------------------------------------
-// Fixtures — phrases must be > MIN_THINKING_WINDOW (80 chars)
+// Fixtures — phrases must be > THINKING_WINDOW (80 chars)
 // ---------------------------------------------------------------------------
 
 const A = "I'm realizing the core issue: the model only allows one active profile per model. ";   // 82
 const B = "The most practical approach would be to merge parameters from multiple profiles.   ";  // 82
 const C = "However there might be parameter conflicts when two profiles define the same key.   ";  // 83
 
-assert.ok(A.length > MIN_THINKING_WINDOW, "fixture A must be > 80 chars");
-assert.ok(B.length > MIN_THINKING_WINDOW, "fixture B must be > 80 chars");
-assert.ok(C.length > MIN_THINKING_WINDOW, "fixture C must be > 80 chars");
+assert.ok(A.length > THINKING_WINDOW, "fixture A must be > 80 chars");
+assert.ok(B.length > THINKING_WINDOW, "fixture B must be > 80 chars");
+assert.ok(C.length > THINKING_WINDOW, "fixture C must be > 80 chars");
 
 // Semantic loop fixtures — must be > PARA_MIN_LEN (40 chars)
 const P1 = "The segfault might be related to the ComboBox widget initialization and timing.";
@@ -202,7 +250,7 @@ describe("detectRepeatingSuffix", () => {
     assert.equal(detectRepeatingSuffix(A + B + C), null);
   });
 
-  test("text shorter than MIN_THINKING_WINDOW * 2 — no detection", () => {
+  test("text shorter than THINKING_WINDOW * 2 — no detection", () => {
     assert.equal(detectRepeatingSuffix(A), null);
   });
 
@@ -232,9 +280,9 @@ describe("detectRepeatingSuffix", () => {
     assert.equal(detectRepeatingSuffix(A1 + B + A2 + B), null);
   });
 
-  test("repeating unit longer than MAX_THINKING_WINDOW is not detected (cap)", () => {
+  test("repeating unit longer than MAX_WINDOW is not detected (cap)", () => {
     let unit = "";
-    for (let i = 0; unit.length <= MAX_THINKING_WINDOW; i++) unit += `segment ${i} of unique filler text. `;
+    for (let i = 0; unit.length <= MAX_WINDOW; i++) unit += `segment ${i} of unique filler text. `;
     assert.equal(detectRepeatingSuffix(unit + unit), null);
   });
 
@@ -242,10 +290,10 @@ describe("detectRepeatingSuffix", () => {
     const fullLoop = A + B + A + B + A + B;
     let detected = false;
     let detectedAt = -1;
-    const CHECK_STRIDE = 50;
-    for (let i = CHECK_STRIDE; i <= fullLoop.length; i += CHECK_STRIDE) {
+    const STRIDE = 50;
+    for (let i = STRIDE; i <= fullLoop.length; i += STRIDE) {
       const chunk = fullLoop.slice(0, i);
-      if (chunk.length < MIN_THINKING_WINDOW * 2) continue;
+      if (chunk.length < THINKING_WINDOW * 2) continue;
       if (detectRepeatingSuffix(chunk)) { detected = true; detectedAt = i; break; }
     }
     assert.ok(detected, "loop should be detected before stream ends");
@@ -253,52 +301,52 @@ describe("detectRepeatingSuffix", () => {
   });
 });
 
-describe("output text loop detection (detectRepeatingSuffix with MIN_OUTPUT_WINDOW)", () => {
+describe("output text loop detection (detectRepeatingSuffix with OUTPUT_WINDOW)", () => {
   // Real-world repro: a code-analysis phrase (~250 chars) repeated verbatim in
-  // the visible response — well above MIN_OUTPUT_WINDOW, so the char-level
+  // the visible response — well above OUTPUT_WINDOW, so the char-level
   // detector must fire on the output text stream.
   const PHRASE =
     "readPersistedSriHashes = try { const cached = await env.CACHE.get(key); return JSON.parse(cached); } catch { return null; } — " +
     "try (1) + catch (1) + cached (1) + JSON.parse (0) + return null (0) = 3. await = 1. env.CACHE.get = 4. Total = 8. cyc=8. Still. ";
 
-  assert.ok(PHRASE.length > MIN_OUTPUT_WINDOW, "fixture PHRASE must exceed MIN_OUTPUT_WINDOW");
+  assert.ok(PHRASE.length > OUTPUT_WINDOW, "fixture PHRASE must exceed OUTPUT_WINDOW");
 
   test("phrase repeated 10x in output → detected", () => {
-    assert.notEqual(detectRepeatingSuffix(PHRASE.repeat(10), MIN_OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix(PHRASE.repeat(10), OUTPUT_WINDOW), null);
   });
 
   test("detection fires on the second repetition already", () => {
-    assert.notEqual(detectRepeatingSuffix(PHRASE.repeat(2), MIN_OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix(PHRASE.repeat(2), OUTPUT_WINDOW), null);
   });
 
   test("cleanPrefix trims the trailing repetition", () => {
-    const result = detectRepeatingSuffix(PHRASE + PHRASE, MIN_OUTPUT_WINDOW);
+    const result = detectRepeatingSuffix(PHRASE + PHRASE, OUTPUT_WINDOW);
     assert.equal(result.cleanPrefix, PHRASE);
   });
 
   test("newline-separated repetitions are still adjacent → detected", () => {
-    assert.notEqual(detectRepeatingSuffix((PHRASE + "\n").repeat(5), MIN_OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix((PHRASE + "\n").repeat(5), OUTPUT_WINDOW), null);
   });
 
   test("single occurrence → no detection", () => {
-    assert.equal(detectRepeatingSuffix(PHRASE, MIN_OUTPUT_WINDOW), null);
+    assert.equal(detectRepeatingSuffix(PHRASE, OUTPUT_WINDOW), null);
   });
 
   test("output window is stricter than thinking window (80 < unit < 100 not flagged)", () => {
     const short = "This sentence is over eighty characters long but it stays under one hundred, yes sir!! "; // 87 chars
-    assert.ok(short.length > MIN_THINKING_WINDOW && short.length < MIN_OUTPUT_WINDOW);
-    assert.equal(detectRepeatingSuffix(short + short, MIN_OUTPUT_WINDOW), null);
-    assert.notEqual(detectRepeatingSuffix(short + short, MIN_THINKING_WINDOW), null);
+    assert.ok(short.length > THINKING_WINDOW && short.length < OUTPUT_WINDOW);
+    assert.equal(detectRepeatingSuffix(short + short, OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix(short + short, THINKING_WINDOW), null);
   });
 
-  test("unit shorter than MIN_OUTPUT_WINDOW still caught once the run is long enough", () => {
+  test("unit shorter than OUTPUT_WINDOW still caught once the run is long enough", () => {
     // Real-world repro: "crap > cyc + cog + ..." (67 chars) repeated inline.
     // A single unit is below the 100-char window, but a window of two units
     // (134 chars) also repeats adjacently, so the scan still catches it.
     const unit = "crap > cyc + cog + loc + coupling + complexity + maintainability = ";
-    assert.ok(unit.length < MIN_OUTPUT_WINDOW);
-    assert.equal(detectRepeatingSuffix(unit.repeat(2), MIN_OUTPUT_WINDOW), null);
-    assert.notEqual(detectRepeatingSuffix(unit.repeat(4), MIN_OUTPUT_WINDOW), null);
+    assert.ok(unit.length < OUTPUT_WINDOW);
+    assert.equal(detectRepeatingSuffix(unit.repeat(2), OUTPUT_WINDOW), null);
+    assert.notEqual(detectRepeatingSuffix(unit.repeat(4), OUTPUT_WINDOW), null);
   });
 
   test("near-identical (but not verbatim) attempts do not trigger", () => {
@@ -309,17 +357,17 @@ describe("output text loop detection (detectRepeatingSuffix with MIN_OUTPUT_WIND
       "readPersistedSriHashes with if guard: try (1) + catch (1) + cached (1) + if (1) = 4. Total = 9. cyc=9. Still.",
       "readPersistedSriHashes bare: try (1) + catch (1) + cached (1) = 3. Total = 8. cyc=8. Still.",
     ].join("\n\n");
-    assert.equal(detectRepeatingSuffix(attempts, MIN_OUTPUT_WINDOW), null);
+    assert.equal(detectRepeatingSuffix(attempts, OUTPUT_WINDOW), null);
   });
 
   test("streaming simulation: output loop fires before stream ends", () => {
     const fullLoop = PHRASE.repeat(10);
-    const CHECK_STRIDE = 50;
+    const STRIDE = 50;
     let detectedAt = -1;
-    for (let i = CHECK_STRIDE; i <= fullLoop.length; i += CHECK_STRIDE) {
+    for (let i = STRIDE; i <= fullLoop.length; i += STRIDE) {
       const chunk = fullLoop.slice(0, i);
-      if (chunk.length < MIN_OUTPUT_WINDOW * 2) continue;
-      if (detectRepeatingSuffix(chunk, MIN_OUTPUT_WINDOW)) { detectedAt = i; break; }
+      if (chunk.length < OUTPUT_WINDOW * 2) continue;
+      if (detectRepeatingSuffix(chunk, OUTPUT_WINDOW)) { detectedAt = i; break; }
     }
     assert.ok(detectedAt > 0, "output loop should be detected mid-stream");
     assert.ok(detectedAt < fullLoop.length, `detection at ${detectedAt} should precede end ${fullLoop.length}`);
@@ -718,9 +766,9 @@ describe("setConfigValue", () => {
   });
 
   test("negative and zero values are allowed (finite numbers)", () => {
-    const cfg = { CHECK_STRIDE: 50 };
-    assert.equal(setConfigValue(cfg, "CHECK_STRIDE=0"), "CHECK_STRIDE=0");
-    assert.equal(cfg.CHECK_STRIDE, 0);
+    const cfg = { STRIDE: 50 };
+    assert.equal(setConfigValue(cfg, "STRIDE=0"), "STRIDE=0");
+    assert.equal(cfg.STRIDE, 0);
   });
 
   test("message (MSG_*) keys are not settable, left unchanged", () => {
@@ -849,5 +897,168 @@ describe("fmt (message template interpolation)", () => {
 
   test("string values interpolate too", () => {
     assert.equal(fmt("pattern {pattern}", { pattern: "GL" }), "pattern GL");
+  });
+});
+
+describe("zArray", () => {
+  test("all-same string: z[i] = n - i", () => {
+    assert.deepEqual([...zArray("aaaa")], [4, 3, 2, 1]);
+  });
+  test("periodic string: full match at the period", () => {
+    assert.equal(zArray("abcabc")[3], 3);
+  });
+  test("no repetition → zeros after z[0]", () => {
+    assert.deepEqual([...zArray("abcd")], [4, 0, 0, 0]);
+  });
+  test("empty string", () => assert.equal(zArray("").length, 0));
+});
+
+describe("detectSemanticLoop — output stream (same detector, both streams)", () => {
+  const P1 = "The segfault might be related to the ComboBox widget initialization and timing.";
+  const P2 = "Actually, no. The set_profiles method is called after the UI is fully built here.";
+  const P3 = "OK, I am going in circles. Let me just try running the app to reproduce this.";
+
+  test("cycling paragraphs with varying tails: semantic fires where char-level cannot", () => {
+    // The repeats share the fingerprint (first 60 chars) but differ afterward,
+    // so no verbatim adjacent repetition exists for detectRepeatingSuffix —
+    // this is exactly the case that motivated semantic detection on output.
+    const text = [P1 + " First attempt.", P2, P1 + " Second attempt.", P3, P1 + " Third attempt."].join("\n\n");
+    assert.equal(detectRepeatingSuffix(text, OUTPUT_WINDOW), null);
+    assert.notEqual(detectSemanticLoop(text), null);
+  });
+
+  test("repeating unit longer than MAX_WINDOW: semantic still catches it", () => {
+    // Char-level is capped at MAX_WINDOW; a huge repeating unit is invisible
+    // to it, but its paragraphs repeat and the fingerprints catch that.
+    let filler = "";
+    for (let i = 0; filler.length <= MAX_WINDOW; i++) filler += `unique filler segment number ${i} with enough length to matter. `;
+    const unit = P1 + "\n\n" + filler + "\n\n";
+    assert.notEqual(detectSemanticLoop(unit.repeat(3)), null);
+  });
+});
+
+describe("detectSemanticLoop — code fence skipping", () => {
+  const P1 = "The segfault might be related to the ComboBox widget initialization and timing.";
+  const P2 = "Actually, no. The set_profiles method is called after the UI is fully built here.";
+  const P3 = "OK, I am going in circles. Let me just try running the app to reproduce this.";
+  const CODE = "```ts\nexport function normalize(input) { return input.trim().toLowerCase(); }\n```";
+
+  test("identical fenced code blocks repeated do not fire (legitimate structure)", () => {
+    assert.equal(detectSemanticLoop([CODE, CODE, CODE, CODE].join("\n\n")), null);
+  });
+
+  test("paragraphs inside a fence with blank lines are skipped", () => {
+    const fenced = "```\n" + P1 + "\n\n" + P1 + "\n\n" + P1 + "\n```";
+    assert.equal(detectSemanticLoop(fenced), null);
+  });
+
+  test("prose repetition around code blocks still fires", () => {
+    const text = [CODE, P1, P2, CODE, P1, P3, P1].join("\n\n");
+    assert.notEqual(detectSemanticLoop(text), null);
+  });
+});
+
+describe("detectSemanticLoop — incremental state (streaming)", () => {
+  const P1 = "The segfault might be related to the ComboBox widget initialization and timing.";
+  const P2 = "Actually, no. The set_profiles method is called after the UI is fully built here.";
+  const P3 = "OK, I am going in circles. Let me just try running the app to reproduce this.";
+  const TEXT = [P1, P2, P1, P3, P1].join("\n\n");
+
+  test("stateful streaming fires with the same cleanPrefix as the stateless scan", () => {
+    const state = newSemanticState();
+    let fired = null;
+    for (let i = 50; i <= TEXT.length && !fired; i += 50) {
+      fired = detectSemanticLoop(TEXT.slice(0, i), state);
+    }
+    if (!fired) fired = detectSemanticLoop(TEXT, state);
+    assert.notEqual(fired, null);
+    assert.equal(fired.cleanPrefix, detectSemanticLoop(TEXT).cleanPrefix);
+  });
+
+  test("closed paragraphs are committed and not rescanned", () => {
+    const state = newSemanticState();
+    const partial = [P1, P2].join("\n\n") + "\n\n";
+    assert.equal(detectSemanticLoop(partial, state), null);
+    assert.equal(state.scanned, partial.length);
+    assert.equal(state.counts.size, 2);
+  });
+
+  test("the trailing (still-streaming) paragraph is never committed", () => {
+    const state = newSemanticState();
+    assert.equal(detectSemanticLoop([P1, P2].join("\n\n"), state), null);
+    // P2 is unterminated: only P1 was committed
+    assert.equal(state.counts.size, 1);
+  });
+
+  test("counts persist across calls: later occurrences complete the loop", () => {
+    const state = newSemanticState();
+    assert.equal(detectSemanticLoop([P1, P2].join("\n\n") + "\n\n", state), null);
+    assert.notEqual(detectSemanticLoop(TEXT, state), null);
+  });
+
+  test("fence state carries across calls", () => {
+    const state = newSemanticState();
+    const open = "```\n" + P1 + "\n\n";
+    assert.equal(detectSemanticLoop(open, state), null);
+    assert.ok(state.inFence);
+    // Everything until the closing fence is skipped, even repeated prose
+    assert.equal(detectSemanticLoop(open + [P1, P1, P1].join("\n\n"), state), null);
+  });
+});
+
+describe("migrateRenamedKeys (pre-1.8.0 config migration)", () => {
+  test("customized old value is carried to the new key", () => {
+    assert.deepEqual(migrateRenamedKeys({ CONFIG_VERSION: 2, MIN_THINKING_WINDOW: 120 }), {
+      THINKING_WINDOW: 120,
+    });
+  });
+
+  test("value left at the old default is dropped (new default applies)", () => {
+    assert.deepEqual(migrateRenamedKeys({ CONFIG_VERSION: 2, MAX_THINKING_WINDOW: 2000 }), {});
+  });
+
+  test("all renamed keys migrate together", () => {
+    assert.deepEqual(
+      migrateRenamedKeys({
+        CONFIG_VERSION: 2,
+        MIN_THINKING_WINDOW: 100,
+        MIN_OUTPUT_WINDOW: 200,
+        MAX_THINKING_WINDOW: 3000,
+        CHECK_STRIDE: 25,
+        PARA_FINGERPRINT_LEN: 80,
+        PARA_LOOP_THRESHOLD: 4,
+      }),
+      {
+        THINKING_WINDOW: 100,
+        OUTPUT_WINDOW: 200,
+        MAX_WINDOW: 3000,
+        STRIDE: 25,
+        FINGERPRINT_LEN: 80,
+        SEMANTIC_THRESHOLD: 4,
+      }
+    );
+  });
+
+  test("file already stamped with CONFIG_VERSION 3 is never migrated", () => {
+    assert.deepEqual(migrateRenamedKeys({ CONFIG_VERSION: 3, MIN_THINKING_WINDOW: 120 }), {});
+  });
+
+  test("an explicit new-name entry wins over the old key", () => {
+    assert.deepEqual(
+      migrateRenamedKeys({ CONFIG_VERSION: 2, MIN_THINKING_WINDOW: 120, THINKING_WINDOW: 90 }),
+      {}
+    );
+  });
+
+  test("pre-1.5.0 file (no CONFIG_VERSION) is migrated too", () => {
+    assert.deepEqual(migrateRenamedKeys({ CHECK_STRIDE: 30 }), { STRIDE: 30 });
+  });
+
+  test("missing/corrupt file (null) → nothing to migrate", () => {
+    assert.deepEqual(migrateRenamedKeys(null), {});
+  });
+
+  test("non-numeric old value is ignored", () => {
+    assert.deepEqual(migrateRenamedKeys({ CONFIG_VERSION: 2, CHECK_STRIDE: "30" }), {});
   });
 });

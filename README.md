@@ -1,17 +1,10 @@
 # pi-loop-police
 
-[![test](https://github.com/sebaxzero/pi-loop-police/actions/workflows/test.yml/badge.svg)](https://github.com/sebaxzero/pi-loop-police/actions/workflows/test.yml)
 [![npm](https://img.shields.io/npm/v/pi-loop-police)](https://www.npmjs.com/package/pi-loop-police)
 
 A [pi](https://pi.dev) extension that detects and breaks infinite loops in real time — before they waste your context window.
 
-Small reasoning models (Qwen, DeepSeek, etc.) are prone to three kinds of loops:
-
-1. **Thinking block loop** — the model repeats the same phrases inside its `<think>` block over and over until the thinking quota is exhausted.
-2. **Output text loop** — the same thing in the visible response: the model repeats a phrase or block verbatim in the answer itself, outside the thinking block.
-3. **Tool call loop** — the model calls the same sequence of tools identically across turns, cycling indefinitely until the global context runs out.
-
-Loop Police catches them **mid-stream** (not after the fact), aborts the looping output, trims it from context, and injects a recovery message so the model can continue with a fresh perspective.
+Reasoning models (especially small local ones like Qwen or DeepSeek) get stuck in characteristic ways: repeating the same phrases inside the thinking block, re-emitting the same paragraph in the visible answer, re-reading the same file over and over, or cycling through an identical sequence of tool calls until the context runs out. Loop Police watches for all of it **as it happens**: it aborts looping output mid-stream, trims the repetition out of your context, and injects a recovery message so the model continues with a fresh perspective — you keep the tokens the loop would have burned.
 
 ## Install
 
@@ -29,98 +22,106 @@ pi install git:github.com/sebaxzero/pi-loop-police.git
 
 Add `-l` to either form to install project-locally (adds to `.pi/settings.json` only).
 
-## How it works
+No dependencies, no build step, nothing to configure — it starts protecting the session as soon as it loads. Everything below is optional tuning.
 
-### Thinking loop detection (two layers, mid-stream)
+## What it detects
 
-**Layer 1 — character-level:** Every 50 streamed characters, the extension checks whether the last ≥ 80 characters of the thinking block appear verbatim immediately before them (exact adjacent repetition). This catches the fastest, most common form of loop mid-stream.
+Eight detectors, all enabled out of the box:
 
-**Layer 2 — semantic-level:** Simultaneously, the thinking text is split into paragraphs and each paragraph is fingerprinted by its first 60 characters. If the same fingerprint appears 3 or more times, the model is cycling through the same reasoning steps even if the wording varies slightly between passes.
+| Detector | Fires when | What happens |
+|----------|-----------|--------------|
+| **Thinking loop** | the thinking block ends in the same ≥ 80 chars twice in a row | stream aborted, repetition truncated, recovery message |
+| **Semantic loop** | the same paragraph appears 3 times in the thinking block | same |
+| **Output loop** | the visible answer ends in the same ≥ 100 chars twice in a row | same |
+| **Output semantic loop** | the same paragraph appears 3 times in the visible answer | same |
+| **Stagnation** | thinking across the last 4 turns is ≥ 85% similar | recovery message |
+| **File read loop** | the same file path is read 4 times | tool call blocked |
+| **Search spiral** | the same pattern is searched in 3 different locations | tool call blocked |
+| **Tool call loop** | an identical sequence of tool calls repeats back-to-back | tool call blocked in place |
 
-On match (either layer):
+### Streaming loops (thinking and output)
 
-- `ctx.abort()` stops the stream immediately.
-- `message_end` trims the repeated portion and replaces it with `[THINKING LOOP — truncated by loop-police]` or `[SEMANTIC LOOP — truncated by loop-police]`.
-- A recovery message is injected into context and triggers a new turn.
+Both streams — the thinking block and the visible response — run the same two detectors as the text arrives, re-checked every 50 new characters (`STRIDE`):
 
-### Output text loop detection (mid-stream)
+- **Character-level**: fires when the text ends in two adjacent, verbatim copies of a block between `THINKING_WINDOW`/`OUTPUT_WINDOW` (80/100) and `MAX_WINDOW` (4000) characters — the model is re-emitting the same content word for word. Detection is a single O(length) pass, so it stays cheap even on very long streams.
+- **Semantic**: every paragraph is fingerprinted by its first `FINGERPRINT_LEN` (60) characters; when the same fingerprint shows up `SEMANTIC_THRESHOLD` (3) times, the model is cycling through the same reasoning even if the wording drifts between passes or other text sits in between. Paragraphs inside ``` code fences are skipped — repeated code structure is legitimate, especially in answers.
 
-The same character-level check runs on the **visible response text** (the `text` content blocks) as it streams, with its own minimum window (`MIN_OUTPUT_WINDOW`, default 100 — slightly stricter than thinking, since answers legitimately contain more structure). When the last ≥ 100 characters of the response repeat verbatim immediately before themselves, the stream is aborted, the repeated portion is replaced with `[OUTPUT LOOP — truncated by loop-police]`, and a recovery message (`MSG_OUTPUT_LOOP`) triggers a new turn.
+The semantic layer is what catches loops early: repeats rarely stay perfectly verbatim, so the character-level check alone can take many extra cycles (or never fire if the repeating unit is huge). With both layers, a loop is typically caught on its third repetition regardless of how the wording mutates.
 
-### Cross-turn reasoning stagnation
+On detection the stream is aborted immediately, the repeated portion is replaced with a marker — `[THINKING LOOP — truncated by loop-police]`, `[SEMANTIC LOOP — …]`, `[OUTPUT LOOP — …]` or `[SEMANTIC OUTPUT LOOP — …]` — and a recovery message is injected that starts a new turn. If the model loops several turns in a row, the message escalates (`CONSECUTIVE_LOOP_LIMIT`).
 
-After each clean (non-aborted) turn, the thinking text is stored. When the last N turns (default: 4) all have Jaccard word-set similarity ≥ 85% with their neighbor, the model is spinning without progress even though no single turn tripped the within-turn detectors. A recovery message is injected and the stagnation window is cleared.
+### Cross-turn stagnation
+
+Some models never loop within a turn but still spin their wheels: each turn's thinking is a light rephrasing of the previous one. After each clean turn the thinking text is stored; when the last `STAGNATION_WINDOW` (4) turns are all ≥ `STAGNATION_THRESHOLD` (85%) word-similar to their neighbor, a recovery message tells the model to change approach.
 
 ### File read repetition
 
-Before each tool call, if the tool name looks like a file-read (`read`, `view`, `cat`, etc.) and the same path has been read 4 or more times, the call is blocked and a recovery message is injected.
+If a tool call looks like a file read (`read`, `view`, `cat`, …) and the same path has already been read `FILE_READ_LIMIT` (4) times, the call is blocked — re-reading it will not produce new information. Raise the limit for edit-heavy workflows where re-reads are legitimate, or run `/loop-police reset` to clear the counters mid-session.
 
 ### Search expansion spiral
 
-Before each search tool call (`grep`, `search`, `find`, `glob`, `rg`, etc.), the extension tracks how many distinct paths a given search pattern has been applied to. When the same pattern reaches 3 or more different paths, the call is blocked — the model is widening its search rather than acting on what it already found.
+Tracks how many distinct paths each search pattern (`grep`, `glob`, `find`, …) has been applied to. At `SEARCH_EXPAND_LIMIT` (3) different locations for the same pattern, the call is blocked: the model is widening its search instead of acting on what it already found.
 
 ### Tool call sequence loop
 
-Before each tool executes, the extension hashes `toolName + stableStringify(args)` and appends it to a flat history. It then checks whether the last *W* calls are identical to the *W* calls immediately before them. On match, the repeated call is **blocked in place** — it does not run, and the recovery message is handed straight back as that tool's result, in the same turn. No new turn is started, and other (different) tools stay available, so the model is forced to pivot immediately instead of re-issuing the same call.
+Each tool call is hashed (`name` + arguments) into a history, and the extension checks whether the last *W* calls exactly repeat the *W* calls before them — any cycle length, not just single calls. On match, the repeated call is **blocked in place**: it does not run, and the recovery message is handed back as that tool's result in the same turn, so the model must pivot immediately while every *other* tool stays available.
 
-Because detection requires *adjacent* repetition, an interleaved different action breaks it: `build → edit → build` does not trip, so legitimate re-runs after real changes are fine. As long as the model keeps repeating the identical call back-to-back, it keeps getting blocked.
+Because detection requires *adjacent* repetition, an interleaved different action breaks it: `build → edit → build` never trips, so legitimate re-runs after real changes are fine.
 
-Set `TOOL_LOOP_BAN: 2` to make blocks **permanent per call**: once a specific call loops, that exact call stays blocked for the rest of the session no matter what (stronger against stubborn models, but it will also block legitimate later re-runs of the same command). `TOOL_LOOP_BAN: 0` disables the detector entirely.
+Two knobs adjust this detector:
 
-To exempt specific tools from this detector, set `TOOL_LOOP_EXEMPT` to a comma-separated list of tool names (case-insensitive, exact match), e.g. `"bash,run_tests"`. Exempt tools are never blocked or banned — useful when identical back-to-back calls are legitimate for a given tool (polling a build, re-running a flaky test). Their calls still enter the history, so they keep breaking adjacency for other tools exactly as any different call does. Unlike message templates, `TOOL_LOOP_EXEMPT` is settable live: `/loop-police set TOOL_LOOP_EXEMPT=bash,run_tests` (no spaces in the list; clear it with `TOOL_LOOP_EXEMPT=`).
+- `TOOL_LOOP_BAN: 2` makes blocks **permanent per call** — once a specific call loops, that exact call stays blocked for the rest of the session (stronger against stubborn models, but it also blocks legitimate later re-runs). `1` (default) blocks only while the call is repeated back-to-back; `0` disables the detector.
+- `TOOL_LOOP_EXEMPT` — comma-separated tool names (case-insensitive) that are never blocked, e.g. `"bash,run_tests"` for polling a build or re-running a flaky test. Exempt calls still enter the history, so they keep breaking adjacency for other tools.
 
-> **Upgrading from < 1.5.0**: the `TOOL_LOOP_BAN` scale shifted by one (old `0` = temporary → new `1`, old `1` = permanent → new `2`; `0` now means off). Migration is automatic: a `loop-police.json` without a `CONFIG_VERSION` stamp is recognized as pre-1.5.0, its `TOOL_LOOP_BAN` is bumped by one to preserve the behavior you had, and the file is stamped so this happens exactly once.
-
-Detection is exact — only identical repetitions trigger it, not similar ones.
-
-## Command
+## Commands
 
 ```
-/loop-police                   — show current detection state and all config values
-/loop-police reset             — clear all state (useful if a false positive fires)
-/loop-police set KEY=VAL       — tune a config value live, no restart needed
-/loop-police set KEY=VAL KEY=VAL ...  — set multiple values at once
+/loop-police                          — show current detection state and all config values
+/loop-police reset                    — clear all state (useful if a false positive fires)
+/loop-police set KEY=VAL [KEY=VAL …]  — tune config values live, no restart needed
 ```
 
 Example: `/loop-police set FILE_READ_LIMIT=6 STAGNATION_WINDOW=5`
 
+Changes made with `set` last for the session; persistent changes go in `loop-police.json` (see below).
+
 ## Configuration
 
-Persistent configuration lives in `extensions/loop-police.json` (auto-created on first load with defaults). You can ask the agent to edit it directly, or tune values live with `/loop-police set KEY=VAL`.
-
-Defaults:
+Persistent configuration lives in `extensions/loop-police.json` next to the installed extension (auto-created on first load). You can ask the agent to edit it, or tune values live with `/loop-police set`.
 
 ```typescript
-MIN_THINKING_WINDOW: 80     // shortest repeating phrase to flag in thinking (chars)
-MAX_THINKING_WINDOW: 2000   // longest phrase checked (thinking and output)
-MIN_OUTPUT_WINDOW: 100      // shortest repeating phrase to flag in the response text
-CHECK_STRIDE: 50            // re-run detection every N new streamed chars
-PARA_MIN_LEN: 40            // shortest paragraph to fingerprint
-PARA_FINGERPRINT_LEN: 60    // chars used as paragraph identity key
-PARA_LOOP_THRESHOLD: 3      // same paragraph fingerprint N times → semantic loop
+THINKING_WINDOW: 80         // char-level: shortest repeating block flagged in thinking
+OUTPUT_WINDOW: 100          // char-level: shortest repeating block flagged in the response
+MAX_WINDOW: 4000            // char-level: longest repeating block checked (both streams)
+STRIDE: 50                  // re-run stream detection every N new characters
+PARA_MIN_LEN: 40            // semantic: shorter paragraphs are ignored
+FINGERPRINT_LEN: 60         // semantic: chars used as paragraph identity key
+SEMANTIC_THRESHOLD: 3       // semantic: same fingerprint N times → loop (both streams)
 STAGNATION_WINDOW: 4        // turns of similar thinking → stagnation
-STAGNATION_THRESHOLD: 0.85  // Jaccard similarity threshold for stagnation
-FILE_READ_LIMIT: 4          // reads of same file path before blocking
-SEARCH_EXPAND_LIMIT: 3      // unique paths for same search pattern before blocking
-CONSECUTIVE_LOOP_LIMIT: 2   // consecutive looped turns before escalating the message
-TOOL_LOOP_BAN: 1            // 0 = off
-                            // 1 = block identical call only while repeated back-to-back
-                            // 2 = ban that exact call for the rest of the session
-TOOL_LOOP_EXEMPT: ""        // comma-separated tool names exempt from the tool
-                            // call loop detector (case-insensitive exact match)
+STAGNATION_THRESHOLD: 0.85  // similarity threshold for stagnation (Jaccard)
+FILE_READ_LIMIT: 4          // reads of the same file path before blocking
+SEARCH_EXPAND_LIMIT: 3      // distinct paths for the same search pattern before blocking
+CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalates
+TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
+TOOL_LOOP_EXEMPT: ""        // tool names exempt from the tool call loop detector
 ```
 
-Increase `MIN_THINKING_WINDOW` or `PARA_LOOP_THRESHOLD` if you get false positives on thinking loops. Increase `MIN_OUTPUT_WINDOW` (or set it to `0`) if your responses legitimately contain long verbatim repetition — e.g. generated code with identical adjacent blocks. Increase `FILE_READ_LIMIT` for projects where legitimately re-reading files is common.
+Tuning rules of thumb:
+
+- False positives on thinking/output loops → raise `THINKING_WINDOW`/`OUTPUT_WINDOW` (char-level) or `SEMANTIC_THRESHOLD`/`FINGERPRINT_LEN` (semantic).
+- Structured answers with legitimately similar paragraph openings (checklists, per-file reports) → raise `FINGERPRINT_LEN` so fingerprints capture more of each paragraph.
+- Projects where re-reading files is normal → raise `FILE_READ_LIMIT`; monorepos → raise `SEARCH_EXPAND_LIMIT`.
+- Loops caught too late → lower `SEMANTIC_THRESHOLD` to 2 (more sensitive, more false-positive prone).
 
 ### Disabling individual detectors
 
-Setting a detector's key to `0` turns that detector off entirely:
+Setting a detector's key to `0` turns it off entirely:
 
 | Key = 0 | Disables |
 |---------|----------|
-| `MIN_THINKING_WINDOW=0` | character-level thinking loop |
-| `PARA_LOOP_THRESHOLD=0` | semantic (paragraph) loop |
-| `MIN_OUTPUT_WINDOW=0` | output text loop |
+| `THINKING_WINDOW=0` | character-level thinking loop |
+| `OUTPUT_WINDOW=0` | character-level output loop |
+| `SEMANTIC_THRESHOLD=0` | semantic loop (thinking **and** output) |
 | `STAGNATION_WINDOW=0` | cross-turn stagnation |
 | `FILE_READ_LIMIT=0` | file read loop |
 | `SEARCH_EXPAND_LIMIT=0` | search expansion spiral |
@@ -134,8 +135,9 @@ The text injected when a loop is detected is configurable — some models respon
 | Key | Fired when | Placeholders |
 |-----|-----------|--------------|
 | `MSG_THINKING_LOOP` | character-level thinking loop | — |
-| `MSG_SEMANTIC_LOOP` | semantic (paragraph) thinking loop | — |
-| `MSG_OUTPUT_LOOP` | character-level loop in the response text | — |
+| `MSG_SEMANTIC_LOOP` | semantic thinking loop | — |
+| `MSG_OUTPUT_LOOP` | character-level output loop | — |
+| `MSG_OUTPUT_SEMANTIC_LOOP` | semantic output loop | — |
 | `MSG_CONSECUTIVE_LOOP` | `CONSECUTIVE_LOOP_LIMIT` looped turns in a row | `{count}` |
 | `MSG_STAGNATION` | cross-turn reasoning stagnation | `{window}` `{threshold}` |
 | `MSG_FILE_READ_LOOP` | same file read too many times | `{path}` `{count}` |
@@ -145,7 +147,7 @@ The text injected when a loop is detected is configurable — some models respon
 
 `{placeholder}` tokens are substituted at runtime; unknown tokens are left as-is so a typo stays visible. Messages are edited in `loop-police.json` only — `/loop-police set` handles numeric keys (plus `TOOL_LOOP_EXEMPT`) and will refuse a `MSG_*` key.
 
-`MSG_SUFFIX` is for instructions that should ride along with every detection without rewriting each template — the typical use is pointing the model at an advisor extension or tool to consult once a loop is caught:
+`MSG_SUFFIX` rides along with every detection without rewriting each template — the typical use is pointing the model at an advisor extension or tool to consult once a loop is caught:
 
 ```json
 {
@@ -158,7 +160,14 @@ The text injected when a loop is detected is configurable — some models respon
 Two skills ship with the extension:
 
 - **loop-police-help** — reference card: commands, config keys, and where the persistent `loop-police.json` lives for each install type.
-- **loop-police-postmortem** — asks the agent to analyze the loop-police detections in the current session: reconstruct what triggered each firing, classify it (justified / false positive / justified-but-ineffective), and recommend config changes where tuning could have avoided it — as a `/loop-police set` line plus a `loop-police.json` snippet. Trigger it with things like *"why did loop-police fire?"*, *"was that a false positive?"*, or *"do a loop post-mortem"*.
+- **loop-police-postmortem** — asks the agent to analyze the loop-police detections in the current session: reconstruct what triggered each firing, classify it (justified / false positive / justified-but-ineffective), and recommend config changes where tuning could have avoided it. Trigger it with things like *"why did loop-police fire?"*, *"was that a false positive?"*, or *"do a loop post-mortem"*.
+
+## Upgrading
+
+Config migrations are automatic — your customized values are preserved and the file is re-stamped, once:
+
+- **From < 1.8.0**: the stream-detector keys were renamed (`MIN_THINKING_WINDOW` → `THINKING_WINDOW`, `MIN_OUTPUT_WINDOW` → `OUTPUT_WINDOW`, `MAX_THINKING_WINDOW` → `MAX_WINDOW`, `CHECK_STRIDE` → `STRIDE`, `PARA_FINGERPRINT_LEN` → `FINGERPRINT_LEN`, `PARA_LOOP_THRESHOLD` → `SEMANTIC_THRESHOLD`). Customized values are carried over to the new names; values you never touched pick up the new defaults (notably `MAX_WINDOW` grew from 2000 to 4000).
+- **From < 1.5.0**: the `TOOL_LOOP_BAN` scale shifted by one (old `0` = temporary → new `1`, old `1` = permanent → new `2`; `0` now means off). The stored value is bumped to preserve the behavior you had.
 
 ## Compatibility
 
@@ -166,24 +175,6 @@ Designed for OpenAI-compatible reasoning models (Qwen3, DeepSeek-R1, etc.) used 
 
 Works alongside [pi-canary](https://github.com/sebaxzero/pi-canary), which silently verifies agent context awareness using hidden canary tokens. When loop-police aborts a turn, pi-canary yields gracefully and does not fire its own recovery.
 
-## Tests
-
-```bash
-node --test test.mjs
-```
-
-All detectors' pure logic is covered by a dependency-free suite — no build
-step, plain Node. CI runs it on every push and pull request.
-
-## Releasing
-
-Bump `version` in `package.json`, commit, tag `vX.Y.Z`, and push the tag —
-the publish workflow runs the tests and publishes to npm.
-
 ## License
 
 MIT
-
----
-
-Built with [Claude](https://claude.ai).

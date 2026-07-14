@@ -23,6 +23,7 @@ leaves a distinct trace:
 | Thinking loop (character) | assistant thinking ending in `[THINKING LOOP — truncated by loop-police]` + a warning message starting `⚠️ THINKING LOOP DETECTED` |
 | Semantic loop | thinking ending in `[SEMANTIC LOOP — truncated by loop-police]` + `⚠️ SEMANTIC LOOP DETECTED` |
 | Output loop | assistant response text ending in `[OUTPUT LOOP — truncated by loop-police]` + `⚠️ OUTPUT LOOP DETECTED` |
+| Output semantic loop | response text ending in `[SEMANTIC OUTPUT LOOP — truncated by loop-police]` + `⚠️ OUTPUT SEMANTIC LOOP DETECTED` |
 | Consecutive loop (escalation) | `⚠️ CONSECUTIVE LOOP ({count}x)` warning |
 | Stagnation | `⚠️ REASONING STAGNATION` warning |
 | File read loop | blocked tool call whose result/reason contains `loop-police: file read {count}x — {path}` + `⚠️ FILE READ LOOP` warning |
@@ -41,16 +42,20 @@ extension file — check, in order:
 3. `~/.pi/agent/extensions/pi-loop-police/extensions/loop-police.json`
 4. The same three paths under the project's `./.pi/agent/` (local install)
 
-If none is readable, use the defaults: `MIN_THINKING_WINDOW=80`,
-`MAX_THINKING_WINDOW=2000`, `MIN_OUTPUT_WINDOW=100`, `CHECK_STRIDE=50`,
-`PARA_MIN_LEN=40`,
-`PARA_FINGERPRINT_LEN=60`, `PARA_LOOP_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
+If none is readable, use the defaults: `THINKING_WINDOW=80`,
+`OUTPUT_WINDOW=100`, `MAX_WINDOW=4000`, `STRIDE=50`, `PARA_MIN_LEN=40`,
+`FINGERPRINT_LEN=60`, `SEMANTIC_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
 `STAGNATION_THRESHOLD=0.85`, `FILE_READ_LIMIT=4`, `SEARCH_EXPAND_LIMIT=3`,
-`CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`. A value of `0` on
-`MIN_THINKING_WINDOW`, `PARA_LOOP_THRESHOLD`, `MIN_OUTPUT_WINDOW`, `STAGNATION_WINDOW`,
+`CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`. (Configs written before 1.8.0
+may still show the old names `MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`,
+`MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`,
+`PARA_LOOP_THRESHOLD` — they map 1:1 onto the new ones and are migrated
+automatically on next load.) A value of `0` on
+`THINKING_WINDOW`, `OUTPUT_WINDOW`, `SEMANTIC_THRESHOLD`, `STAGNATION_WINDOW`,
 `FILE_READ_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT` or
 `TOOL_LOOP_BAN` means that detector is disabled — a disabled detector cannot
-have fired, so skip it. Keep in mind the session may
+have fired, so skip it (`SEMANTIC_THRESHOLD=0` disables the semantic detector
+on both streams). Keep in mind the session may
 also carry `/loop-police set` overrides the JSON does not show — if the user
 ran one earlier in this conversation, it wins.
 
@@ -99,9 +104,11 @@ Evidence patterns for **false positives**, per detector:
   command while waiting on external state) or an identical re-run that was
   actually wanted. Detection fires on the 2nd identical back-to-back call —
   there is no threshold key for this one.
-- **Semantic loop**: structured output where paragraphs legitimately start
-  identically (numbered checklists, per-file reports, table-like blocks) —
-  the first `PARA_FINGERPRINT_LEN` chars collide without real repetition.
+- **Semantic loop** (thinking or output): structured text where paragraphs
+  legitimately start identically (numbered checklists, per-file reports,
+  table-like blocks) — the first `FINGERPRINT_LEN` chars collide without real
+  repetition. Note that fenced code blocks are already skipped by the
+  detector, so repeated code alone cannot be the cause.
 - **Character thinking loop**: repeated boilerplate the model quotes
   verbatim more than once (code blocks, error messages, long identifiers) —
   rare at the default 80-char window, plausible below it.
@@ -121,12 +128,12 @@ Map each non-justified verdict to a config change:
 | Search spiral FP | raise `SEARCH_EXPAND_LIMIT` (3 → 5) — monorepos and multi-package repos usually need this |
 | Tool loop FP (polling) | no threshold key exists; recommend the agent interleave a different call between polls, or `/loop-police reset`; do NOT recommend raising `TOOL_LOOP_BAN` here (and only suggest `TOOL_LOOP_BAN=0` — detector off — if the user explicitly wants it gone) |
 | Tool loop ineffective (model keeps re-issuing the blocked call) | `TOOL_LOOP_BAN=2` |
-| Semantic FP | raise `PARA_LOOP_THRESHOLD` (3 → 4–5) and/or `PARA_FINGERPRINT_LEN` (60 → 100); raise `PARA_MIN_LEN` if short bullets collided |
-| Character FP | raise `MIN_THINKING_WINDOW` (80 → 120–160) |
-| Output loop FP | raise `MIN_OUTPUT_WINDOW` (100 → 200–400); `MIN_OUTPUT_WINDOW=0` only if the user explicitly wants it off |
+| Semantic FP (thinking or output) | raise `SEMANTIC_THRESHOLD` (3 → 4–5) and/or `FINGERPRINT_LEN` (60 → 100); raise `PARA_MIN_LEN` if short bullets collided |
+| Character FP | raise `THINKING_WINDOW` (80 → 120–160) |
+| Output loop FP | raise `OUTPUT_WINDOW` (100 → 200–400); `OUTPUT_WINDOW=0` only if the user explicitly wants it off |
 | Stagnation FP | raise `STAGNATION_THRESHOLD` (0.85 → 0.90–0.95) or `STAGNATION_WINDOW` (4 → 6) |
-| Thinking loop ineffective / `CONSECUTIVE LOOP` seen | reword `MSG_THINKING_LOOP` / `MSG_SEMANTIC_LOOP` for this model (shorter, more imperative, name the alternative action); or lower `CONSECUTIVE_LOOP_LIMIT` to escalate sooner |
-| Loops detected *late* (long truncated prefix already wasted) | lower `MIN_THINKING_WINDOW`, or lower `PARA_LOOP_THRESHOLD` if the semantic layer caught what the character layer missed |
+| Stream loop ineffective / `CONSECUTIVE LOOP` seen | reword the corresponding `MSG_*` template for this model (shorter, more imperative, name the alternative action); or lower `CONSECUTIVE_LOOP_LIMIT` to escalate sooner |
+| Loops detected *late* (long truncated prefix already wasted) | lower `THINKING_WINDOW`/`OUTPUT_WINDOW`, or lower `SEMANTIC_THRESHOLD` if the semantic layer caught what the character layer missed |
 
 Rules:
 

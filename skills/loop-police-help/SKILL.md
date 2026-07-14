@@ -13,13 +13,14 @@ loops in real time before they exhaust your context window.
 ## What it detects
 
 - **Thinking loop**: thinking block repeating the same phrases verbatim
-- **Semantic loop**: thinking block cycling through the same reasoning steps
+- **Semantic loop**: thinking block cycling through the same paragraphs
 - **Output loop**: visible response text repeating the same content verbatim
+- **Output semantic loop**: visible response cycling through the same paragraphs
 - **Stagnation**: thinking across N turns is 85%+ similar (Jaccard)
 - **File read loop**: same file read ≥ FILE_READ_LIMIT times in one session
 - **Search spiral**: same pattern searched across ≥ SEARCH_EXPAND_LIMIT paths
 - **Tool call loop**: identical sequence of tool calls repeating
-- **Consecutive loop**: thinking loop aborted N turns in a row (escalated warning)
+- **Consecutive loop**: stream loop aborted N turns in a row (escalated warning)
 
 ## Commands
 
@@ -33,22 +34,24 @@ loops in real time before they exhaust your context window.
 
 | Key | Default | What it controls |
 |-----|---------|-----------------|
-| `MIN_THINKING_WINDOW` | `80` | Minimum characters before thinking loop detection starts |
-| `MAX_THINKING_WINDOW` | `2000` | Maximum window size for repeating-suffix scan (thinking and output) |
-| `MIN_OUTPUT_WINDOW` | `100` | Minimum repeating phrase length flagged in the response text |
-| `CHECK_STRIDE` | `50` | Check every N new characters during streaming |
+| `THINKING_WINDOW` | `80` | Shortest repeating block flagged in the thinking stream (chars) |
+| `OUTPUT_WINDOW` | `100` | Shortest repeating block flagged in the response text (chars) |
+| `MAX_WINDOW` | `4000` | Longest repeating block checked (char-level, both streams) |
+| `STRIDE` | `50` | Check every N new characters during streaming |
 | `PARA_MIN_LEN` | `40` | Minimum paragraph length to fingerprint for semantic loop |
-| `PARA_FINGERPRINT_LEN` | `60` | Characters used as paragraph fingerprint |
-| `PARA_LOOP_THRESHOLD` | `3` | Repetitions before semantic loop is declared |
+| `FINGERPRINT_LEN` | `60` | Characters used as paragraph fingerprint |
+| `SEMANTIC_THRESHOLD` | `3` | Same fingerprint N times → semantic loop (thinking and output) |
 | `STAGNATION_WINDOW` | `4` | Turns of thinking history to compare |
 | `STAGNATION_THRESHOLD` | `0.85` | Jaccard similarity threshold for stagnation |
 | `FILE_READ_LIMIT` | `4` | Block file reads at or above this count |
 | `SEARCH_EXPAND_LIMIT` | `3` | Block search pattern at or above this many paths |
-| `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N thinking-loop aborts in a row (across turns) |
+| `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N stream-loop aborts in a row (across turns) |
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
 | `TOOL_LOOP_EXEMPT` | `""` | Comma-separated tool names exempt from the tool call loop detector (case-insensitive exact match, e.g. `bash,run_tests`); exempt calls are never blocked but still break adjacency for other tools |
 
-Setting a detector's key to `0` disables it: `MIN_THINKING_WINDOW=0` (thinking loop), `PARA_LOOP_THRESHOLD=0` (semantic loop), `MIN_OUTPUT_WINDOW=0` (output loop), `STAGNATION_WINDOW=0` (stagnation), `FILE_READ_LIMIT=0` (file read loop), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
+Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_READ_LIMIT=0` (file read loop), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
+
+Pre-1.8.0 configs used other names (`MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`, `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`, `PARA_LOOP_THRESHOLD`) — they are migrated automatically on load.
 
 ## Message templates
 
@@ -61,6 +64,7 @@ settable via `/loop-police set`. `{placeholders}` are filled at runtime:
 | `MSG_THINKING_LOOP` | — |
 | `MSG_SEMANTIC_LOOP` | — |
 | `MSG_OUTPUT_LOOP` | — |
+| `MSG_OUTPUT_SEMANTIC_LOOP` | — |
 | `MSG_CONSECUTIVE_LOOP` | `{count}` |
 | `MSG_STAGNATION` | `{window}` `{threshold}` |
 | `MSG_FILE_READ_LOOP` | `{path}` `{count}` |

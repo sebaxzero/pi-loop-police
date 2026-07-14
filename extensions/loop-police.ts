@@ -10,22 +10,22 @@ const EXT_DIR = dirname(fileURLToPath(import.meta.url));
 const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 
 // Setting a detector's key to 0 disables that detector entirely:
-//   MIN_THINKING_WINDOW=0    → character-level thinking loop off
-//   PARA_LOOP_THRESHOLD=0    → semantic loop off
-//   MIN_OUTPUT_WINDOW=0      → output text loop off
+//   THINKING_WINDOW=0        → character-level thinking loop off
+//   OUTPUT_WINDOW=0          → character-level output loop off
+//   SEMANTIC_THRESHOLD=0     → semantic (paragraph) loop off, both streams
 //   STAGNATION_WINDOW=0      → cross-turn stagnation off
 //   FILE_READ_LIMIT=0        → file read loop off
 //   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
 //   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
 //   TOOL_LOOP_BAN=0          → tool call sequence loop off
 const NUMERIC_DEFAULTS = {
-  MIN_THINKING_WINDOW: 80,
-  MAX_THINKING_WINDOW: 2000,
-  MIN_OUTPUT_WINDOW: 100,
-  CHECK_STRIDE: 50,
+  THINKING_WINDOW: 80,
+  OUTPUT_WINDOW: 100,
+  MAX_WINDOW: 4000,
+  STRIDE: 50,
   PARA_MIN_LEN: 40,
-  PARA_FINGERPRINT_LEN: 60,
-  PARA_LOOP_THRESHOLD: 3,
+  FINGERPRINT_LEN: 60,
+  SEMANTIC_THRESHOLD: 3,
   STAGNATION_WINDOW: 4,
   STAGNATION_THRESHOLD: 0.85,
   FILE_READ_LIMIT: 4,
@@ -62,6 +62,8 @@ const MESSAGE_DEFAULTS = {
     "⚠️ SEMANTIC LOOP DETECTED: Your thinking block was cycling through the same reasoning steps repeatedly. The repeated section has been truncated. Step back and try a completely different approach.",
   MSG_OUTPUT_LOOP:
     "⚠️ OUTPUT LOOP DETECTED: Your response text was repeating the same content verbatim and has been truncated. Do NOT re-emit the repeated content — continue from where the response was cut, or wrap up with a concise conclusion.",
+  MSG_OUTPUT_SEMANTIC_LOOP:
+    "⚠️ OUTPUT SEMANTIC LOOP DETECTED: Your response text was cycling through the same paragraphs repeatedly. The repeated section has been truncated. Do NOT re-emit the repeated content — continue past it or wrap up with a concise conclusion.",
   MSG_CONSECUTIVE_LOOP:
     "⚠️ CONSECUTIVE LOOP ({count}x): You have entered a loop {count} times in a row and loop-police has aborted your output each time. Stop — provide a direct, concise answer or ask for clarification.",
   MSG_STAGNATION:
@@ -78,8 +80,22 @@ const MESSAGE_DEFAULTS = {
 const DEFAULTS = { ...NUMERIC_DEFAULTS, ...STRING_DEFAULTS, ...MESSAGE_DEFAULTS };
 
 // Stamped into loop-police.json. Files written before 1.5.0 lack it, which is
-// how migrateToolLoopBan() recognizes the old TOOL_LOOP_BAN scale.
-const CONFIG_VERSION = 2;
+// how migrateToolLoopBan() recognizes the old TOOL_LOOP_BAN scale; files
+// stamped below 3 still use the pre-1.8.0 key names (see RENAMED_KEYS).
+const CONFIG_VERSION = 3;
+
+// 1.8.0 (CONFIG_VERSION 3) renamed the stream-detector keys to conventional
+// terms. migrateRenamedKeys() carries customized values over to the new names;
+// values left at the old default are dropped so the new defaults apply (that
+// is how existing installs pick up the larger MAX_WINDOW).
+const RENAMED_KEYS: Record<string, { to: string; oldDefault: number }> = {
+  MIN_THINKING_WINDOW: { to: "THINKING_WINDOW", oldDefault: 80 },
+  MIN_OUTPUT_WINDOW: { to: "OUTPUT_WINDOW", oldDefault: 100 },
+  MAX_THINKING_WINDOW: { to: "MAX_WINDOW", oldDefault: 2000 },
+  CHECK_STRIDE: { to: "STRIDE", oldDefault: 50 },
+  PARA_FINGERPRINT_LEN: { to: "FINGERPRINT_LEN", oldDefault: 60 },
+  PARA_LOOP_THRESHOLD: { to: "SEMANTIC_THRESHOLD", oldDefault: 3 },
+};
 
 const cfg: typeof DEFAULTS & Record<string, number | string> = (() => {
   // Read the existing config (null = missing or unreadable/corrupt).
@@ -98,6 +114,12 @@ const cfg: typeof DEFAULTS & Record<string, number | string> = (() => {
   // exactly once.
   const migratedBan = migrateToolLoopBan(fromFile);
   if (migratedBan !== null) merged.TOOL_LOOP_BAN = migratedBan;
+
+  // Pre-1.8.0 configs used the old stream-detector key names. Carry customized
+  // values to the new keys, then drop the old keys so they are not written back.
+  Object.assign(merged, migrateRenamedKeys(fromFile));
+  for (const oldKey of Object.keys(RENAMED_KEYS)) delete (merged as any)[oldKey];
+
   const stampNeeded = fromFile !== null && fromFile.CONFIG_VERSION !== CONFIG_VERSION;
   merged.CONFIG_VERSION = CONFIG_VERSION;
 
@@ -122,7 +144,10 @@ export default function (pi: ExtensionAPI) {
   let cleanStreamPrefix: string | null = null;
   let lastCheckedLen = 0;
   let lastCheckedOutputLen = 0;
-  let loopType: "character" | "semantic" | "output" = "character";
+  let loopStream: "thinking" | "output" = "thinking";
+  let loopKind: "character" | "semantic" = "character";
+  let thinkingSem = newSemanticState();
+  let outputSem = newSemanticState();
   let toolHistory: string[] = [];
   let bannedCalls = new Set<string>();
   let thinkingHistory: string[] = [];
@@ -130,12 +155,21 @@ export default function (pi: ExtensionAPI) {
   let searchPatternPaths = new Map<string, Set<string>>();
   let consecutiveLoopCount = 0;
 
+  // Per-stream detector state: stride checkpoints + incremental semantic scan.
+  // Reset whenever a new assistant message (or a new block) starts streaming.
+  function resetStreamState() {
+    lastCheckedLen = 0;
+    lastCheckedOutputLen = 0;
+    thinkingSem = newSemanticState();
+    outputSem = newSemanticState();
+  }
+
   function reset() {
     streamAborted = false;
     cleanStreamPrefix = null;
-    lastCheckedLen = 0;
-    lastCheckedOutputLen = 0;
-    loopType = "character";
+    resetStreamState();
+    loopStream = "thinking";
+    loopKind = "character";
     toolHistory = [];
     bannedCalls = new Set();
     thinkingHistory = [];
@@ -147,11 +181,11 @@ export default function (pi: ExtensionAPI) {
   pi.on("agent_start", reset);
 
   pi.on("turn_start", () => {
-    lastCheckedLen = 0;
-    lastCheckedOutputLen = 0;
+    resetStreamState();
     streamAborted = false;
     cleanStreamPrefix = null;
-    loopType = "character";
+    loopStream = "thinking";
+    loopKind = "character";
     // NOTE: consecutiveLoopCount is intentionally NOT reset here. Recovery
     // turns fire turn_start, so resetting would defeat cross-turn escalation.
     // It is cleared on a clean (non-aborted) turn in message_end instead.
@@ -169,39 +203,57 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("message_update", (event, ctx) => {
     if (streamAborted || event.message.role !== "assistant") return;
+    const semanticOn = cfg.SEMANTIC_THRESHOLD > 0;
 
-    // Thinking block loops: character-level + semantic
-    const charLoopOn = cfg.MIN_THINKING_WINDOW > 0;
-    const semanticLoopOn = cfg.PARA_LOOP_THRESHOLD > 0;
-    if (charLoopOn || semanticLoopOn) {
+    // Thinking stream: character-level + semantic
+    if (cfg.THINKING_WINDOW > 0 || semanticOn) {
       const thinking = extractThinking(event.message);
-      if (thinking && thinking.length >= lastCheckedLen + cfg.CHECK_STRIDE) {
-        lastCheckedLen = thinking.length;
-        if (!charLoopOn || thinking.length >= cfg.MIN_THINKING_WINDOW * 2) {
-          let repeat = charLoopOn
-            ? detectRepeatingSuffix(thinking, cfg.MIN_THINKING_WINDOW)
-            : null;
-          if (repeat) {
-            loopType = "character";
-          } else if (semanticLoopOn) {
-            repeat = detectSemanticLoop(thinking);
-            if (repeat) loopType = "semantic";
+      if (thinking) {
+        // Shrinking text means a new thinking block started streaming (next
+        // message in the same turn) — restart this stream's detector state.
+        if (thinking.length < lastCheckedLen) {
+          lastCheckedLen = 0;
+          thinkingSem = newSemanticState();
+        }
+        if (thinking.length >= lastCheckedLen + cfg.STRIDE) {
+          lastCheckedLen = thinking.length;
+          let kind: "character" | "semantic" = "character";
+          let repeat =
+            cfg.THINKING_WINDOW > 0 ? detectRepeatingSuffix(thinking, cfg.THINKING_WINDOW) : null;
+          if (!repeat && semanticOn) {
+            repeat = detectSemanticLoop(thinking, thinkingSem);
+            if (repeat) kind = "semantic";
           }
-          if (repeat) return abortStream(repeat.cleanPrefix, ctx);
+          if (repeat) {
+            loopStream = "thinking";
+            loopKind = kind;
+            return abortStream(repeat.cleanPrefix, ctx);
+          }
         }
       }
     }
 
-    // Output text loop: character-level on the visible response (text blocks
-    // stream too — a phrase repeating verbatim outside the thinking block).
-    if (cfg.MIN_OUTPUT_WINDOW > 0) {
+    // Output stream: the same two detectors on the visible response (the last
+    // text block streams too — a phrase or paragraph repeating in the answer).
+    if (cfg.OUTPUT_WINDOW > 0 || semanticOn) {
       const output = extractText(event.message);
-      if (output && output.length >= lastCheckedOutputLen + cfg.CHECK_STRIDE) {
-        lastCheckedOutputLen = output.length;
-        if (output.length >= cfg.MIN_OUTPUT_WINDOW * 2) {
-          const repeat = detectRepeatingSuffix(output, cfg.MIN_OUTPUT_WINDOW);
+      if (output) {
+        if (output.length < lastCheckedOutputLen) {
+          lastCheckedOutputLen = 0;
+          outputSem = newSemanticState();
+        }
+        if (output.length >= lastCheckedOutputLen + cfg.STRIDE) {
+          lastCheckedOutputLen = output.length;
+          let kind: "character" | "semantic" = "character";
+          let repeat =
+            cfg.OUTPUT_WINDOW > 0 ? detectRepeatingSuffix(output, cfg.OUTPUT_WINDOW) : null;
+          if (!repeat && semanticOn) {
+            repeat = detectSemanticLoop(output, outputSem);
+            if (repeat) kind = "semantic";
+          }
           if (repeat) {
-            loopType = "output";
+            loopStream = "output";
+            loopKind = kind;
             abortStream(repeat.cleanPrefix, ctx);
           }
         }
@@ -216,26 +268,25 @@ export default function (pi: ExtensionAPI) {
       const prefix = cleanStreamPrefix ?? "";
       streamAborted = false;
       cleanStreamPrefix = null;
-      lastCheckedLen = 0;
-      lastCheckedOutputLen = 0;
+      resetStreamState();
 
       const label =
-        loopType === "output"
-          ? "[OUTPUT LOOP — truncated by loop-police]"
-          : loopType === "semantic"
+        loopStream === "output"
+          ? loopKind === "semantic"
+            ? "[SEMANTIC OUTPUT LOOP — truncated by loop-police]"
+            : "[OUTPUT LOOP — truncated by loop-police]"
+          : loopKind === "semantic"
             ? "[SEMANTIC LOOP — truncated by loop-police]"
             : "[THINKING LOOP — truncated by loop-police]";
       const advice =
         cfg.CONSECUTIVE_LOOP_LIMIT > 0 && consecutiveLoopCount >= cfg.CONSECUTIVE_LOOP_LIMIT
           ? fmt(cfg.MSG_CONSECUTIVE_LOOP, { count: consecutiveLoopCount })
-          : loopType === "output"
-            ? String(cfg.MSG_OUTPUT_LOOP)
-            : loopType === "semantic"
-              ? String(cfg.MSG_SEMANTIC_LOOP)
-              : String(cfg.MSG_THINKING_LOOP);
+          : loopStream === "output"
+            ? String(loopKind === "semantic" ? cfg.MSG_OUTPUT_SEMANTIC_LOOP : cfg.MSG_OUTPUT_LOOP)
+            : String(loopKind === "semantic" ? cfg.MSG_SEMANTIC_LOOP : cfg.MSG_THINKING_LOOP);
 
       const cleaned =
-        loopType === "output"
+        loopStream === "output"
           ? replaceText(event.message, `${prefix}\n\n${label}`)
           : replaceThinking(event.message, `${prefix}\n\n${label}`);
       pi.sendMessage(
@@ -245,8 +296,10 @@ export default function (pi: ExtensionAPI) {
       return { message: cleaned };
     }
 
-    // Clean turn — the model produced a non-looping thinking block, so it is
-    // making progress. Clear the consecutive-loop escalation counter.
+    // Clean message — restart the per-stream detector state so the next
+    // assistant message in this turn starts fresh (lengths reset to zero), and
+    // clear the consecutive-loop escalation counter: the model is progressing.
+    resetStreamState();
     consecutiveLoopCount = 0;
 
     // Cross-turn stagnation: only run on clean (non-aborted) turns
@@ -461,6 +514,21 @@ function migrateToolLoopBan(fromFile: Record<string, unknown> | null): number | 
   return old + 1;
 }
 
+// Returns the { newKey: value } assignments produced by renaming pre-1.8.0
+// config keys. Applies only to files not yet stamped with CONFIG_VERSION 3.
+// Only customized values (different from the old default) are carried over,
+// and never over an explicit new-name entry already present in the file.
+function migrateRenamedKeys(fromFile: Record<string, unknown> | null): Record<string, number> {
+  const out: Record<string, number> = {};
+  if (!fromFile || (typeof fromFile.CONFIG_VERSION === "number" && fromFile.CONFIG_VERSION >= 3))
+    return out;
+  for (const [oldKey, { to, oldDefault }] of Object.entries(RENAMED_KEYS)) {
+    const val = fromFile[oldKey];
+    if (typeof val === "number" && val !== oldDefault && !(to in fromFile)) out[to] = val;
+  }
+  return out;
+}
+
 function jaccard(a: string, b: string): number {
   const setA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
   const setB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
@@ -543,37 +611,84 @@ function replaceThinking(message: any, newText: string): any {
   return { ...message, content };
 }
 
-function detectSemanticLoop(text: string): { cleanPrefix: string } | null {
-  const counts = new Map<string, number>();
-  let searchFrom = 0;
-  for (const para of text.split(/\n\n+/)) {
-    const paraStart = text.indexOf(para, searchFrom);
-    if (paraStart === -1) continue;
-    searchFrom = paraStart + para.length;
-    const trimmed = para.trim();
-    if (trimmed.length >= cfg.PARA_MIN_LEN) {
-      const key = trimmed.slice(0, cfg.PARA_FINGERPRINT_LEN);
-      const count = (counts.get(key) ?? 0) + 1;
-      counts.set(key, count);
-      if (count >= cfg.PARA_LOOP_THRESHOLD) {
-        return { cleanPrefix: text.slice(0, paraStart) };
-      }
-    }
-  }
-  return null;
+// Incremental scan state for detectSemanticLoop: fingerprint counts of the
+// paragraphs already processed, the absolute offset where the next unprocessed
+// paragraph starts, and whether that offset sits inside a ``` code fence.
+type SemanticState = { counts: Map<string, number>; scanned: number; inFence: boolean };
+
+function newSemanticState(): SemanticState {
+  return { counts: new Map(), scanned: 0, inFence: false };
 }
 
-// minWindow is MIN_THINKING_WINDOW for thinking blocks, MIN_OUTPUT_WINDOW for
-// output text; MAX_THINKING_WINDOW caps the repeating unit length for both.
+// Semantic loop: paragraphs (blank-line separated) are fingerprinted by their
+// first FINGERPRINT_LEN chars; a fingerprint seen SEMANTIC_THRESHOLD times
+// means the model is cycling through the same content even when wording
+// drifts after the fingerprint or other text sits between repeats. Paragraphs
+// inside (or containing) ``` code fences are skipped — repeated code
+// structure is legitimate, especially in output text.
+// With `state` the scan is incremental across stream checkpoints: paragraphs
+// closed by a blank line are counted once and never re-scanned; the trailing,
+// still-streaming paragraph is re-checked every call but never committed.
+function detectSemanticLoop(text: string, state?: SemanticState): { cleanPrefix: string } | null {
+  const s = state ?? newSemanticState();
+  const delim = /\n\n+/g;
+  delim.lastIndex = s.scanned;
+  let pos = s.scanned;
+  let inFence = s.inFence;
+  for (;;) {
+    const m = delim.exec(text);
+    const end = m ? m.index : text.length;
+    const para = text.slice(pos, end);
+    const fenceMarks = (para.match(/```/g) ?? []).length;
+    if (!inFence && fenceMarks === 0) {
+      const trimmed = para.trim();
+      if (trimmed.length >= cfg.PARA_MIN_LEN) {
+        const key = trimmed.slice(0, cfg.FINGERPRINT_LEN);
+        const count = (s.counts.get(key) ?? 0) + 1;
+        if (count >= cfg.SEMANTIC_THRESHOLD) return { cleanPrefix: text.slice(0, pos) };
+        if (m) s.counts.set(key, count);
+      }
+    }
+    if (!m) return null;
+    if (fenceMarks % 2 === 1) inFence = !inFence;
+    pos = delim.lastIndex;
+    s.scanned = pos;
+    s.inFence = inFence;
+  }
+}
+
+// Z-array: z[i] = length of the longest common prefix of s and s.slice(i).
+function zArray(s: string): Int32Array {
+  const n = s.length;
+  const z = new Int32Array(n);
+  if (n === 0) return z;
+  z[0] = n;
+  for (let i = 1, l = 0, r = 0; i < n; i++) {
+    if (i < r) z[i] = Math.min(r - i, z[i - l]);
+    while (i + z[i] < n && s.charCodeAt(z[i]) === s.charCodeAt(i + z[i])) z[i]++;
+    if (i + z[i] > r) {
+      l = i;
+      r = i + z[i];
+    }
+  }
+  return z;
+}
+
+// Character-level loop: the text ends in two adjacent identical copies of a
+// block of minWindow..MAX_WINDOW chars. Computed as a Z-array over the
+// reversed tail — z[w] >= w means the last w chars equal the w chars right
+// before them — one O(tail) pass instead of the old O(MAX_WINDOW²) scan, and
+// it still finds the smallest repeating block. Only the last 2×MAX_WINDOW
+// chars are examined, so MAX_WINDOW caps the size of the repeating block.
+// minWindow is THINKING_WINDOW for thinking, OUTPUT_WINDOW for output text.
 function detectRepeatingSuffix(text: string, minWindow: number): { cleanPrefix: string } | null {
   const n = text.length;
-  const limit = Math.min(cfg.MAX_THINKING_WINDOW, Math.floor(n / 2));
-  for (let w = minWindow; w <= limit; w++) {
-    const tail = text.slice(n - w);
-    const prev = text.slice(n - 2 * w, n - w);
-    if (prev.length === w && tail === prev) {
-      return { cleanPrefix: text.slice(0, n - w) };
-    }
+  const maxW = Math.min(cfg.MAX_WINDOW, Math.floor(n / 2));
+  if (minWindow <= 0 || maxW < minWindow) return null;
+  const tail = text.slice(Math.max(0, n - 2 * maxW));
+  const z = zArray(tail.split("").reverse().join(""));
+  for (let w = minWindow; w <= maxW; w++) {
+    if (z[w] >= w) return { cleanPrefix: text.slice(0, n - w) };
   }
   return null;
 }
