@@ -115,11 +115,22 @@ function setConfigValue(target, pair) {
   const key = pair.slice(0, eq);
   const val = pair.slice(eq + 1);
   if (!(key in target)) return `unknown: ${key}`;
-  if (typeof target[key] === "string") return `not settable: ${key} (edit loop-police.json)`;
+  if (key.startsWith("MSG_")) return `not settable: ${key} (edit loop-police.json)`;
+  if (typeof target[key] === "string") {
+    target[key] = val;
+    return `${key}="${val}"`;
+  }
   const num = Number(val);
   if (val === "" || !Number.isFinite(num)) return `invalid: ${key}=${val}`;
   target[key] = num;
   return `${key}=${num}`;
+}
+
+function isExemptTool(name, exemptCfg) {
+  const list = String(exemptCfg ?? "");
+  if (!list.trim()) return false;
+  const target = name.toLowerCase();
+  return list.split(",").some((t) => t.trim().toLowerCase() === target);
 }
 
 function migrateToolLoopBan(fromFile) {
@@ -712,13 +723,71 @@ describe("setConfigValue", () => {
     assert.equal(cfg.CHECK_STRIDE, 0);
   });
 
-  test("string (message) keys are not settable, left unchanged", () => {
+  test("message (MSG_*) keys are not settable, left unchanged", () => {
     const cfg = { MSG_TOOL_LOOP: "loop!" };
     assert.equal(
       setConfigValue(cfg, "MSG_TOOL_LOOP=5"),
       "not settable: MSG_TOOL_LOOP (edit loop-police.json)"
     );
     assert.equal(cfg.MSG_TOOL_LOOP, "loop!");
+  });
+
+  test("TOOL_LOOP_EXEMPT is settable as a string", () => {
+    const cfg = { TOOL_LOOP_EXEMPT: "" };
+    assert.equal(setConfigValue(cfg, "TOOL_LOOP_EXEMPT=bash,run_tests"), 'TOOL_LOOP_EXEMPT="bash,run_tests"');
+    assert.equal(cfg.TOOL_LOOP_EXEMPT, "bash,run_tests");
+  });
+
+  test("TOOL_LOOP_EXEMPT can be cleared with an empty value", () => {
+    const cfg = { TOOL_LOOP_EXEMPT: "bash" };
+    assert.equal(setConfigValue(cfg, "TOOL_LOOP_EXEMPT="), 'TOOL_LOOP_EXEMPT=""');
+    assert.equal(cfg.TOOL_LOOP_EXEMPT, "");
+  });
+});
+
+describe("isExemptTool (TOOL_LOOP_EXEMPT)", () => {
+  test("empty list exempts nothing", () => assert.ok(!isExemptTool("bash", "")));
+  test("undefined config exempts nothing", () => assert.ok(!isExemptTool("bash", undefined)));
+  test("whitespace-only list exempts nothing", () => assert.ok(!isExemptTool("bash", "  ")));
+  test("single entry matches", () => assert.ok(isExemptTool("bash", "bash")));
+  test("comma list matches any entry", () => assert.ok(isExemptTool("run_tests", "bash,run_tests")));
+  test("case-insensitive match", () => assert.ok(isExemptTool("Bash", "bash")));
+  test("entries are trimmed", () => assert.ok(isExemptTool("edit", "bash, edit ,read")));
+  test("exact name only — no substring match", () => assert.ok(!isExemptTool("bash_run", "bash")));
+  test("non-listed tool is not exempt", () => assert.ok(!isExemptTool("grep", "bash,edit")));
+
+  // Mirrors the tool_call hook: exempt calls are recorded but never checked;
+  // blocked calls are not recorded (history stays at the looping state).
+  function simulate(calls, exempt) {
+    const history = [];
+    const blocked = [];
+    for (const [name, hash] of calls) {
+      if (isExemptTool(name, exempt)) { history.push(hash); continue; }
+      if (detectSequenceRepeat([...history, hash]) > 0) { blocked.push(hash); continue; }
+      history.push(hash);
+    }
+    return blocked;
+  }
+
+  test("exempt tool repeating identically is never blocked", () => {
+    const calls = [["bash", "bash:test"], ["bash", "bash:test"], ["bash", "bash:test"]];
+    assert.deepEqual(simulate(calls, "bash"), []);
+    assert.equal(simulate(calls, "").length, 2); // without exemption both repeats block
+  });
+
+  test("exempt calls still break adjacency for other tools", () => {
+    // read → bash → read: identical reads separated by an exempt call are
+    // allowed, same as before the exemption existed.
+    const calls = [["read", "read:/foo"], ["bash", "bash:test"], ["read", "read:/foo"]];
+    assert.deepEqual(simulate(calls, "bash"), []);
+  });
+
+  test("non-exempt tool looping alongside an exempt one is still blocked", () => {
+    const calls = [
+      ["bash", "bash:test"], ["read", "read:/foo"],
+      ["bash", "bash:test"], ["read", "read:/foo"],
+    ];
+    assert.deepEqual(simulate(calls, "bash"), ["read:/foo"]);
   });
 });
 

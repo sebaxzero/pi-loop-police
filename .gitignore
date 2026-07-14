@@ -1,3 +1,7 @@
 node_modules/
 .claude/
 *.log
+
+# Runtime config ? auto-created next to the extension on first load; user-edited,
+# so it must never be tracked (a tracked copy gets clobbered on pi update)
+extensions/loop-police.json

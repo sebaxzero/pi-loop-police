@@ -67,6 +67,8 @@ Because detection requires *adjacent* repetition, an interleaved different actio
 
 Set `TOOL_LOOP_BAN: 2` to make blocks **permanent per call**: once a specific call loops, that exact call stays blocked for the rest of the session no matter what (stronger against stubborn models, but it will also block legitimate later re-runs of the same command). `TOOL_LOOP_BAN: 0` disables the detector entirely.
 
+To exempt specific tools from this detector, set `TOOL_LOOP_EXEMPT` to a comma-separated list of tool names (case-insensitive, exact match), e.g. `"bash,run_tests"`. Exempt tools are never blocked or banned — useful when identical back-to-back calls are legitimate for a given tool (polling a build, re-running a flaky test). Their calls still enter the history, so they keep breaking adjacency for other tools exactly as any different call does. Unlike message templates, `TOOL_LOOP_EXEMPT` is settable live: `/loop-police set TOOL_LOOP_EXEMPT=bash,run_tests` (no spaces in the list; clear it with `TOOL_LOOP_EXEMPT=`).
+
 > **Upgrading from < 1.5.0**: the `TOOL_LOOP_BAN` scale shifted by one (old `0` = temporary → new `1`, old `1` = permanent → new `2`; `0` now means off). Migration is automatic: a `loop-police.json` without a `CONFIG_VERSION` stamp is recognized as pre-1.5.0, its `TOOL_LOOP_BAN` is bumped by one to preserve the behavior you had, and the file is stamped so this happens exactly once.
 
 Detection is exact — only identical repetitions trigger it, not similar ones.
@@ -104,6 +106,8 @@ CONSECUTIVE_LOOP_LIMIT: 2   // consecutive looped turns before escalating the me
 TOOL_LOOP_BAN: 1            // 0 = off
                             // 1 = block identical call only while repeated back-to-back
                             // 2 = ban that exact call for the rest of the session
+TOOL_LOOP_EXEMPT: ""        // comma-separated tool names exempt from the tool
+                            // call loop detector (case-insensitive exact match)
 ```
 
 Increase `MIN_THINKING_WINDOW` or `PARA_LOOP_THRESHOLD` if you get false positives on thinking loops. Increase `MIN_OUTPUT_WINDOW` (or set it to `0`) if your responses legitimately contain long verbatim repetition — e.g. generated code with identical adjacent blocks. Increase `FILE_READ_LIMIT` for projects where legitimately re-reading files is common.
@@ -139,7 +143,7 @@ The text injected when a loop is detected is configurable — some models respon
 | `MSG_TOOL_LOOP` | identical tool-call sequence repeating | `{windowSize}` |
 | `MSG_SUFFIX` | appended to **every** message above (empty by default) | — |
 
-`{placeholder}` tokens are substituted at runtime; unknown tokens are left as-is so a typo stays visible. Messages are edited in `loop-police.json` only — `/loop-police set` handles numeric keys and will refuse a `MSG_*` key.
+`{placeholder}` tokens are substituted at runtime; unknown tokens are left as-is so a typo stays visible. Messages are edited in `loop-police.json` only — `/loop-police set` handles numeric keys (plus `TOOL_LOOP_EXEMPT`) and will refuse a `MSG_*` key.
 
 `MSG_SUFFIX` is for instructions that should ride along with every detection without rewriting each template — the typical use is pointing the model at an advisor extension or tool to consult once a loop is caught:
 

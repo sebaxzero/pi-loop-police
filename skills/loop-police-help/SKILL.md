@@ -46,6 +46,7 @@ loops in real time before they exhaust your context window.
 | `SEARCH_EXPAND_LIMIT` | `3` | Block search pattern at or above this many paths |
 | `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N thinking-loop aborts in a row (across turns) |
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
+| `TOOL_LOOP_EXEMPT` | `""` | Comma-separated tool names exempt from the tool call loop detector (case-insensitive exact match, e.g. `bash,run_tests`); exempt calls are never blocked but still break adjacency for other tools |
 
 Setting a detector's key to `0` disables it: `MIN_THINKING_WINDOW=0` (thinking loop), `PARA_LOOP_THRESHOLD=0` (semantic loop), `MIN_OUTPUT_WINDOW=0` (output loop), `STAGNATION_WINDOW=0` (stagnation), `FILE_READ_LIMIT=0` (file read loop), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
 

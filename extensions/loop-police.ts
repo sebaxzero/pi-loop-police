@@ -36,6 +36,14 @@ const NUMERIC_DEFAULTS = {
   //                   2 = ban that exact call for the rest of the session
 };
 
+// Tool names exempt from the tool call sequence loop detector, comma-separated
+// and case-insensitive (e.g. "bash,run_tests"). Exempt calls are never blocked
+// or banned, but they ARE still recorded in the history, so they keep breaking
+// adjacency for other tools exactly as any different call does.
+const STRING_DEFAULTS = {
+  TOOL_LOOP_EXEMPT: "",
+};
+
 // Recovery messages injected into the agent when a loop is detected. Edit these
 // in loop-police.json to tune the wording per model — some models respond
 // better to different phrasing. Placeholders in {braces} are filled at runtime:
@@ -67,7 +75,7 @@ const MESSAGE_DEFAULTS = {
   MSG_SUFFIX: "",
 };
 
-const DEFAULTS = { ...NUMERIC_DEFAULTS, ...MESSAGE_DEFAULTS };
+const DEFAULTS = { ...NUMERIC_DEFAULTS, ...STRING_DEFAULTS, ...MESSAGE_DEFAULTS };
 
 // Stamped into loop-police.json. Files written before 1.5.0 lack it, which is
 // how migrateToolLoopBan() recognizes the old TOOL_LOOP_BAN scale.
@@ -323,6 +331,13 @@ export default function (pi: ExtensionAPI) {
     if (cfg.TOOL_LOOP_BAN <= 0) return;
     const hash = hashToolCall(event.toolName, event.input);
 
+    // Exempt tools (TOOL_LOOP_EXEMPT) are never checked or blocked, but their
+    // calls still enter the history so they break adjacency for other tools.
+    if (isExemptTool(event.toolName, cfg.TOOL_LOOP_EXEMPT)) {
+      toolHistory.push(hash);
+      return;
+    }
+
     // Permanent-ban mode (TOOL_LOOP_BAN=2): once a call has looped, that exact
     // call stays blocked for the rest of the session, no matter what.
     if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
@@ -378,6 +393,7 @@ export default function (pi: ExtensionAPI) {
           "",
           "  config (set KEY=VAL to change):",
           ...Object.keys(NUMERIC_DEFAULTS).map((k) => `    ${k}=${cfg[k]}`),
+          ...Object.keys(STRING_DEFAULTS).map((k) => `    ${k}="${cfg[k]}"`),
           "",
           "  messages (edit loop-police.json to customize):",
           ...Object.keys(MESSAGE_DEFAULTS).map((k) => `    ${k}`),
@@ -414,16 +430,20 @@ function withSuffix(msg: string): string {
 // on success. Returns a human-readable status string for the notification.
 // Rejects unknown keys and non-finite values (e.g. "3px", "", "abc") so a bad
 // input never silently writes NaN into a threshold and disables a detector.
-// Message templates (MSG_*) are string-valued and thus rejected here by design —
-// they are edited in loop-police.json, not via /loop-police set.
+// Message templates (MSG_*) are rejected here by design — they are edited in
+// loop-police.json, not via /loop-police set. Non-message string keys
+// (TOOL_LOOP_EXEMPT) are assigned verbatim.
 function setConfigValue(target: Record<string, number | string>, pair: string): string {
   const eq = pair.indexOf("=");
   if (eq <= 0) return `unknown: ${pair}`;
   const key = pair.slice(0, eq);
   const val = pair.slice(eq + 1);
   if (!(key in target)) return `unknown: ${key}`;
-  // Only numeric config is settable here; string templates are JSON-only.
-  if (typeof target[key] === "string") return `not settable: ${key} (edit loop-police.json)`;
+  if (key.startsWith("MSG_")) return `not settable: ${key} (edit loop-police.json)`;
+  if (typeof target[key] === "string") {
+    target[key] = val;
+    return `${key}="${val}"`;
+  }
   const num = Number(val);
   if (val === "" || !Number.isFinite(num)) return `invalid: ${key}=${val}`;
   target[key] = num;
@@ -448,6 +468,15 @@ function jaccard(a: string, b: string): number {
   for (const w of setA) if (setB.has(w)) inter++;
   const union = setA.size + setB.size - inter;
   return union === 0 ? 1 : inter / union;
+}
+
+// True when `name` appears in the comma-separated TOOL_LOOP_EXEMPT list
+// (case-insensitive, entries trimmed). An empty list exempts nothing.
+function isExemptTool(name: string, exemptCfg: string | number): boolean {
+  const list = String(exemptCfg ?? "");
+  if (!list.trim()) return false;
+  const target = name.toLowerCase();
+  return list.split(",").some((t) => t.trim().toLowerCase() === target);
 }
 
 function isReadTool(name: string): boolean {
