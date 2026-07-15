@@ -208,6 +208,13 @@ function getInputPath(input) {
   return input.path ?? input.file_path ?? input.filename ?? input.file ?? input.directory ?? input.dir ?? null;
 }
 
+function getReadRange(input) {
+  if (typeof input !== "object" || !input) return "";
+  const start = input.offset ?? input.start_line ?? input.startLine ?? null;
+  const end = input.limit ?? input.end_line ?? input.endLine ?? null;
+  return start === null && end === null ? "" : `${start ?? ""}:${end ?? ""}`;
+}
+
 function getSearchPattern(input) {
   if (typeof input !== "object" || !input) return null;
   return input.pattern ?? input.query ?? input.regex ?? input.search ?? input.term ?? null;
@@ -629,6 +636,21 @@ describe("getInputPath", () => {
   test("null → null", () => assert.equal(getInputPath(null), null));
   test("string → null", () => assert.equal(getInputPath("not-an-object"), null));
   test("array → null", () => assert.equal(getInputPath(["/foo"]), null));
+});
+
+describe("getReadRange", () => {
+  test("offset + limit", () => assert.equal(getReadRange({ path: "/f", offset: 100, limit: 50 }), "100:50"));
+  test("start_line + end_line", () => assert.equal(getReadRange({ start_line: 1, end_line: 40 }), "1:40"));
+  test("startLine + endLine", () => assert.equal(getReadRange({ startLine: 5, endLine: 9 }), "5:9"));
+  test("offset only", () => assert.equal(getReadRange({ offset: 200 }), "200:"));
+  test("limit only", () => assert.equal(getReadRange({ limit: 30 }), ":30"));
+  test("offset 0 is a range, not absent", () => assert.equal(getReadRange({ offset: 0, limit: 50 }), "0:50"));
+  test("no range fields → empty string", () => assert.equal(getReadRange({ path: "/f" }), ""));
+  test("null → empty string", () => assert.equal(getReadRange(null), ""));
+  test("distinct offsets give distinct keys", () =>
+    assert.notEqual(getReadRange({ offset: 0, limit: 50 }), getReadRange({ offset: 50, limit: 50 })));
+  test("same range gives the same key", () =>
+    assert.equal(getReadRange({ offset: 50, limit: 50 }), getReadRange({ limit: 50, offset: 50 })));
 });
 
 describe("getSearchPattern", () => {

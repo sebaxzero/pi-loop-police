@@ -15,6 +15,7 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 //   SEMANTIC_THRESHOLD=0     → semantic (paragraph) loop off, both streams
 //   STAGNATION_WINDOW=0      → cross-turn stagnation off
 //   FILE_READ_LIMIT=0        → file read loop off
+//   FILE_SCAN_LIMIT=0        → per-file total read ceiling off
 //   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
 //   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
 //   TOOL_LOOP_BAN=0          → tool call sequence loop off
@@ -28,7 +29,8 @@ const NUMERIC_DEFAULTS = {
   SEMANTIC_THRESHOLD: 3,
   STAGNATION_WINDOW: 4,
   STAGNATION_THRESHOLD: 0.85,
-  FILE_READ_LIMIT: 4,
+  FILE_READ_LIMIT: 4, //  reads of the same path + line range (offset/limit)
+  FILE_SCAN_LIMIT: 15, // total reads of the same path across ALL line ranges
   SEARCH_EXPAND_LIMIT: 3,
   CONSECUTIVE_LOOP_LIMIT: 2,
   TOOL_LOOP_BAN: 1, // 0 = detector off;
@@ -50,6 +52,7 @@ const STRING_DEFAULTS = {
 //   MSG_CONSECUTIVE_LOOP → {count}
 //   MSG_STAGNATION       → {window} {threshold}
 //   MSG_FILE_READ_LOOP   → {path} {count}
+//   MSG_FILE_SCAN_LOOP   → {path} {count}
 //   MSG_SEARCH_SPIRAL    → {pattern} {paths}
 //   MSG_TOOL_LOOP        → {windowSize}
 // MSG_SUFFIX, when non-empty, is appended (after a blank line) to EVERY
@@ -69,7 +72,9 @@ const MESSAGE_DEFAULTS = {
   MSG_STAGNATION:
     "⚠️ REASONING STAGNATION: Your thinking across the last {window} turns has been {threshold}%+ similar — you are not making progress. Stop and try a fundamentally different approach.",
   MSG_FILE_READ_LOOP:
-    '⚠️ FILE READ LOOP: "{path}" has been read {count} times. Reading it again will not yield new information — use what you already know and move forward.',
+    '⚠️ FILE READ LOOP: "{path}" has been read {count} times with the same line range. Reading it again will not yield new information — use what you already know and move forward.',
+  MSG_FILE_SCAN_LOOP:
+    '⚠️ FILE READ CEILING: "{path}" has been read {count} times in total, counting every line range. Paging through it further is not converging — use a targeted search (grep) or what you already read, and move forward.',
   MSG_SEARCH_SPIRAL:
     '⚠️ SEARCH EXPANSION SPIRAL: Pattern "{pattern}" has been searched in {paths} different locations. Broadening the scope further will not help — reconsider what you are looking for.',
   MSG_TOOL_LOOP:
@@ -151,7 +156,8 @@ export default function (pi: ExtensionAPI) {
   let toolHistory: string[] = [];
   let bannedCalls = new Set<string>();
   let thinkingHistory: string[] = [];
-  let fileReadCounts = new Map<string, number>();
+  let fileReadRanges = new Map<string, number>(); // "path range" → reads of that exact range
+  let fileReadTotals = new Map<string, number>(); // path → total reads across all ranges
   let searchPatternPaths = new Map<string, Set<string>>();
   let consecutiveLoopCount = 0;
 
@@ -173,7 +179,8 @@ export default function (pi: ExtensionAPI) {
     toolHistory = [];
     bannedCalls = new Set();
     thinkingHistory = [];
-    fileReadCounts = new Map();
+    fileReadRanges = new Map();
+    fileReadTotals = new Map();
     searchPatternPaths = new Map();
     consecutiveLoopCount = 0;
   }
@@ -334,14 +341,21 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", (event, ctx) => {
-    // File read repetition
-    if (cfg.FILE_READ_LIMIT > 0 && isReadTool(event.toolName)) {
+    // File read repetition. FILE_READ_LIMIT counts reads of the same path AND
+    // the same line range (offset/limit), so paging through a large file in
+    // chunks is not a loop — each chunk yields new information. FILE_SCAN_LIMIT
+    // is a generous per-path ceiling across all ranges, catching the model that
+    // keeps re-scanning one file with ever-different offsets.
+    if ((cfg.FILE_READ_LIMIT > 0 || cfg.FILE_SCAN_LIMIT > 0) && isReadTool(event.toolName)) {
       const path = getInputPath(event.input);
       if (path) {
-        const count = (fileReadCounts.get(path) ?? 0) + 1;
-        fileReadCounts.set(path, count);
-        if (count >= cfg.FILE_READ_LIMIT) {
-          ctx.ui.notify(`⚠️ FILE READ LOOP: "${path}" read ${count}x — blocked`, "warning");
+        const rangeKey = `${path} ${getReadRange(event.input)}`;
+        const count = (fileReadRanges.get(rangeKey) ?? 0) + 1;
+        fileReadRanges.set(rangeKey, count);
+        const total = (fileReadTotals.get(path) ?? 0) + 1;
+        fileReadTotals.set(path, total);
+        if (cfg.FILE_READ_LIMIT > 0 && count >= cfg.FILE_READ_LIMIT) {
+          ctx.ui.notify(`⚠️ FILE READ LOOP: "${path}" read ${count}x (same range) — blocked`, "warning");
           pi.sendMessage(
             {
               customType: "loop-police",
@@ -351,6 +365,18 @@ export default function (pi: ExtensionAPI) {
             { triggerTurn: true }
           );
           return { block: true, reason: `loop-police: file read ${count}x — ${path}` };
+        }
+        if (cfg.FILE_SCAN_LIMIT > 0 && total >= cfg.FILE_SCAN_LIMIT) {
+          ctx.ui.notify(`⚠️ FILE READ CEILING: "${path}" read ${total}x total — blocked`, "warning");
+          pi.sendMessage(
+            {
+              customType: "loop-police",
+              content: withSuffix(fmt(cfg.MSG_FILE_SCAN_LOOP, { path, count: total })),
+              display: true,
+            },
+            { triggerTurn: true }
+          );
+          return { block: true, reason: `loop-police: file read ${total}x total — ${path}` };
         }
       }
     }
@@ -440,7 +466,7 @@ export default function (pi: ExtensionAPI) {
           `  tool history:        ${toolHistory.length} calls`,
           `  banned calls:        ${bannedCalls.size}`,
           `  stagnation history:  ${thinkingHistory.length}/${cfg.STAGNATION_WINDOW} turns`,
-          `  file reads tracked:  ${fileReadCounts.size} paths`,
+          `  file reads tracked:  ${fileReadTotals.size} paths (${fileReadRanges.size} ranges)`,
           `  search patterns:     ${searchPatternPaths.size} patterns`,
           `  consecutive loops:   ${consecutiveLoopCount}/${cfg.CONSECUTIVE_LOOP_LIMIT}`,
           "",
@@ -559,6 +585,18 @@ function getInputPath(input: unknown): string | null {
   if (typeof input !== "object" || !input) return null;
   const inp = input as any;
   return inp.path ?? inp.file_path ?? inp.filename ?? inp.file ?? inp.directory ?? inp.dir ?? null;
+}
+
+// Normalizes the line range of a read call to a "start:end" string ("" when
+// the tool has no range fields — then every read of the path is "the same
+// range"). Field names cover the common read-tool schemas (offset/limit,
+// start_line/end_line, startLine/endLine).
+function getReadRange(input: unknown): string {
+  if (typeof input !== "object" || !input) return "";
+  const inp = input as any;
+  const start = inp.offset ?? inp.start_line ?? inp.startLine ?? null;
+  const end = inp.limit ?? inp.end_line ?? inp.endLine ?? null;
+  return start === null && end === null ? "" : `${start ?? ""}:${end ?? ""}`;
 }
 
 function getSearchPattern(input: unknown): string | null {

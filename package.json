@@ -1,8 +1,18 @@
 {
   "name": "pi-loop-police",
-  "version": "1.8.0",
+  "version": "1.9.0",
   "description": "Pi extension: detects and interrupts infinite thinking-block and tool-call loops in real time before they exhaust your context window.",
-  "keywords": ["pi-package", "pi", "pi-coding-agent", "extension", "loop-detection", "reasoning", "safety", "qwen", "deepseek"],
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-coding-agent",
+    "extension",
+    "loop-detection",
+    "reasoning",
+    "safety",
+    "qwen",
+    "deepseek"
+  ],
   "license": "MIT",
   "homepage": "https://github.com/sebaxzero/pi-loop-police",
   "repository": {
@@ -16,7 +26,11 @@
     "test": "node --test test.mjs"
   },
   "pi": {
-    "extensions": ["./extensions"],
-    "skills": ["./skills"]
+    "extensions": [
+      "./extensions"
+    ],
+    "skills": [
+      "./skills"
+    ]
   }
 }

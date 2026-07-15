@@ -26,7 +26,7 @@ No dependencies, no build step, nothing to configure — it starts protecting th
 
 ## What it detects
 
-Eight detectors, all enabled out of the box:
+Nine detectors, all enabled out of the box:
 
 | Detector | Fires when | What happens |
 |----------|-----------|--------------|
@@ -35,7 +35,8 @@ Eight detectors, all enabled out of the box:
 | **Output loop** | the visible answer ends in the same ≥ 100 chars twice in a row | same |
 | **Output semantic loop** | the same paragraph appears 3 times in the visible answer | same |
 | **Stagnation** | thinking across the last 4 turns is ≥ 85% similar | recovery message |
-| **File read loop** | the same file path is read 4 times | tool call blocked |
+| **File read loop** | the same file path + line range is read 4 times | tool call blocked |
+| **File read ceiling** | the same file path is read 15 times total, across all ranges | tool call blocked |
 | **Search spiral** | the same pattern is searched in 3 different locations | tool call blocked |
 | **Tool call loop** | an identical sequence of tool calls repeats back-to-back | tool call blocked in place |
 
@@ -56,7 +57,9 @@ Some models never loop within a turn but still spin their wheels: each turn's th
 
 ### File read repetition
 
-If a tool call looks like a file read (`read`, `view`, `cat`, …) and the same path has already been read `FILE_READ_LIMIT` (4) times, the call is blocked — re-reading it will not produce new information. Raise the limit for edit-heavy workflows where re-reads are legitimate, or run `/loop-police reset` to clear the counters mid-session.
+If a tool call looks like a file read (`read`, `view`, `cat`, …) and the same path **with the same line range** (`offset`/`limit`, `start_line`/`end_line`, …) has already been read `FILE_READ_LIMIT` (4) times, the call is blocked — re-reading the same range will not produce new information. Paging through a large file in chunks is *not* a loop: each distinct range gets its own counter, so legitimate chunked reads never trip this detector.
+
+A second, generous ceiling covers the pathological complement: `FILE_SCAN_LIMIT` (15) blocks once the same path has been read that many times **in total across all ranges** — the model that keeps re-scanning one file with ever-different offsets instead of searching it. Raise either limit for workflows where heavy re-reading is legitimate, or run `/loop-police reset` to clear the counters mid-session.
 
 ### Search expansion spiral
 
@@ -99,7 +102,8 @@ FINGERPRINT_LEN: 60         // semantic: chars used as paragraph identity key
 SEMANTIC_THRESHOLD: 3       // semantic: same fingerprint N times → loop (both streams)
 STAGNATION_WINDOW: 4        // turns of similar thinking → stagnation
 STAGNATION_THRESHOLD: 0.85  // similarity threshold for stagnation (Jaccard)
-FILE_READ_LIMIT: 4          // reads of the same file path before blocking
+FILE_READ_LIMIT: 4          // reads of the same file path + line range before blocking
+FILE_SCAN_LIMIT: 15         // total reads of the same path (all ranges) before blocking
 SEARCH_EXPAND_LIMIT: 3      // distinct paths for the same search pattern before blocking
 CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalates
 TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
@@ -110,7 +114,7 @@ Tuning rules of thumb:
 
 - False positives on thinking/output loops → raise `THINKING_WINDOW`/`OUTPUT_WINDOW` (char-level) or `SEMANTIC_THRESHOLD`/`FINGERPRINT_LEN` (semantic).
 - Structured answers with legitimately similar paragraph openings (checklists, per-file reports) → raise `FINGERPRINT_LEN` so fingerprints capture more of each paragraph.
-- Projects where re-reading files is normal → raise `FILE_READ_LIMIT`; monorepos → raise `SEARCH_EXPAND_LIMIT`.
+- Projects where re-reading files is normal → raise `FILE_READ_LIMIT` (same range) or `FILE_SCAN_LIMIT` (total per file); monorepos → raise `SEARCH_EXPAND_LIMIT`.
 - Loops caught too late → lower `SEMANTIC_THRESHOLD` to 2 (more sensitive, more false-positive prone).
 
 ### Disabling individual detectors
@@ -124,6 +128,7 @@ Setting a detector's key to `0` turns it off entirely:
 | `SEMANTIC_THRESHOLD=0` | semantic loop (thinking **and** output) |
 | `STAGNATION_WINDOW=0` | cross-turn stagnation |
 | `FILE_READ_LIMIT=0` | file read loop |
+| `FILE_SCAN_LIMIT=0` | file read ceiling |
 | `SEARCH_EXPAND_LIMIT=0` | search expansion spiral |
 | `CONSECUTIVE_LOOP_LIMIT=0` | escalated consecutive-loop message |
 | `TOOL_LOOP_BAN=0` | tool call sequence loop |
@@ -140,7 +145,8 @@ The text injected when a loop is detected is configurable — some models respon
 | `MSG_OUTPUT_SEMANTIC_LOOP` | semantic output loop | — |
 | `MSG_CONSECUTIVE_LOOP` | `CONSECUTIVE_LOOP_LIMIT` looped turns in a row | `{count}` |
 | `MSG_STAGNATION` | cross-turn reasoning stagnation | `{window}` `{threshold}` |
-| `MSG_FILE_READ_LOOP` | same file read too many times | `{path}` `{count}` |
+| `MSG_FILE_READ_LOOP` | same file + line range read too many times | `{path}` `{count}` |
+| `MSG_FILE_SCAN_LOOP` | same file read too many times in total (all ranges) | `{path}` `{count}` |
 | `MSG_SEARCH_SPIRAL` | search pattern spread across too many paths | `{pattern}` `{paths}` |
 | `MSG_TOOL_LOOP` | identical tool-call sequence repeating | `{windowSize}` |
 | `MSG_SUFFIX` | appended to **every** message above (empty by default) | — |
