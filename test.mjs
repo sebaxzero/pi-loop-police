@@ -1105,3 +1105,83 @@ describe("migrateRenamedKeys (pre-1.8.0 config migration)", () => {
     assert.deepEqual(migrateRenamedKeys({ CONFIG_VERSION: 2, CHECK_STRIDE: "30" }), {});
   });
 });
+
+// Duplicated from extensions/loop-police.ts — detection hook helpers
+function splitHookCmd(cmd) {
+  const parts = cmd.trim().split(/\s+/).filter(Boolean);
+  return parts.length === 0 ? null : { command: parts[0], args: parts.slice(1) };
+}
+
+function buildDetectionPayload(event, details, info) {
+  return { event, timestamp: new Date().toISOString(), ...info, details };
+}
+
+describe("splitHookCmd (HOOK_CMD parsing)", () => {
+  test("blank config disables the hook", () => {
+    assert.equal(splitHookCmd(""), null);
+    assert.equal(splitHookCmd("   "), null);
+  });
+
+  test("bare executable → no fixed args", () => {
+    assert.deepEqual(splitHookCmd("/home/user/hook.sh"), {
+      command: "/home/user/hook.sh",
+      args: [],
+    });
+  });
+
+  test("interpreter + script split into command and fixed args", () => {
+    assert.deepEqual(splitHookCmd("node /path/to/hook.mjs"), {
+      command: "node",
+      args: ["/path/to/hook.mjs"],
+    });
+    assert.deepEqual(splitHookCmd("python C:\hooks\loop.py --flag"), {
+      command: "python",
+      args: ["C:\hooks\loop.py", "--flag"],
+    });
+  });
+
+  test("surrounding and repeated whitespace is collapsed", () => {
+    assert.deepEqual(splitHookCmd("  node   hook.mjs  "), {
+      command: "node",
+      args: ["hook.mjs"],
+    });
+  });
+});
+
+describe("buildDetectionPayload (hook payload shape)", () => {
+  const info = {
+    model: { id: "qwen3", name: "Qwen3", provider: "ollama" },
+    sessionId: "abc123",
+    sessionFile: "/sessions/abc123.jsonl",
+    cwd: "/work",
+    turnIndex: 7,
+    consecutiveLoops: 2,
+  };
+
+  test("payload carries event, info fields, and details verbatim", () => {
+    const p = buildDetectionPayload("tool_loop", { toolName: "bash", windowSize: 3 }, info);
+    assert.equal(p.event, "tool_loop");
+    assert.deepEqual(p.model, info.model);
+    assert.equal(p.sessionId, "abc123");
+    assert.equal(p.sessionFile, "/sessions/abc123.jsonl");
+    assert.equal(p.cwd, "/work");
+    assert.equal(p.turnIndex, 7);
+    assert.equal(p.consecutiveLoops, 2);
+    assert.deepEqual(p.details, { toolName: "bash", windowSize: 3 });
+  });
+
+  test("timestamp is a valid ISO date", () => {
+    const p = buildDetectionPayload("stagnation", {}, info);
+    assert.ok(!Number.isNaN(Date.parse(p.timestamp)));
+  });
+
+  test("model may be null (no model selected)", () => {
+    const p = buildDetectionPayload("thinking_loop", {}, { ...info, model: null });
+    assert.equal(p.model, null);
+  });
+
+  test("payload round-trips through JSON (argv delivery)", () => {
+    const p = buildDetectionPayload("search_spiral", { pattern: 'a"b\nc', paths: 3 }, info);
+    assert.deepEqual(JSON.parse(JSON.stringify(p)), p);
+  });
+});

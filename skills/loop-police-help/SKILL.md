@@ -50,6 +50,9 @@ loops in real time before they exhaust your context window.
 | `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N stream-loop aborts in a row (across turns) |
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
 | `TOOL_LOOP_EXEMPT` | `""` | Comma-separated tool names exempt from the tool call loop detector (case-insensitive exact match, e.g. `bash,run_tests`); exempt calls are never blocked but still break adjacency for other tools |
+| `HOOK_CMD` | `""` | External command run fire-and-forget on every detection with the JSON payload as its last argument (split on whitespace, no shell — e.g. `node /path/hook.mjs`); observational only, never affects detection |
+| `HOOK_TIMEOUT_MS` | `5000` | `HOOK_CMD` is killed after this many ms |
+| `HOOK_LOG` | `""` | Path to a JSONL file; one payload line appended per detection (relative paths resolve against the session cwd) |
 
 Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_READ_LIMIT=0` (file read loop), `FILE_SCAN_LIMIT=0` (file read ceiling), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
 
@@ -107,3 +110,13 @@ Example `loop-police.json`:
 ```
 
 Only include the keys you want to override — missing keys use the defaults above.
+
+## Detection hooks
+
+Every detection emits a JSON payload (`event`, `timestamp`, `model`, `sessionId`, `sessionFile`, `cwd`, `turnIndex`, `consecutiveLoops`, `details`) to three observer channels, none of which can affect detection or recovery:
+
+- **`loop-police:detection`** on pi's extension event bus — always on; other extensions subscribe with `pi.events.on("loop-police:detection", handler)`.
+- **`HOOK_CMD`** — external command per detection, payload as last argument (any language; see `examples/hook.mjs` in the repo).
+- **`HOOK_LOG`** — JSONL append per detection; ideal for stats like which model/detector fires most (`jq -r '"\(.model.id) \(.event)"' file | sort | uniq -c`).
+
+The `event` field matches the detector: `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_read_loop`, `file_scan_loop`, `search_spiral`, `tool_loop`. See the README's "Detection hooks" section for the full payload schema and per-event `details`.

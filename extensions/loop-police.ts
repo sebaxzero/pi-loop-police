@@ -1,7 +1,7 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 // Config lives next to the extension file: ./extensions/loop-police.json
@@ -36,14 +36,26 @@ const NUMERIC_DEFAULTS = {
   TOOL_LOOP_BAN: 1, // 0 = detector off;
   //                   1 = block identical call only while repeated back-to-back;
   //                   2 = ban that exact call for the rest of the session
+  HOOK_TIMEOUT_MS: 5000, // HOOK_CMD is killed after this many ms
 };
 
 // Tool names exempt from the tool call sequence loop detector, comma-separated
 // and case-insensitive (e.g. "bash,run_tests"). Exempt calls are never blocked
 // or banned, but they ARE still recorded in the history, so they keep breaking
 // adjacency for other tools exactly as any different call does.
+// Every detection also emits a payload on pi's extension event bus
+// ("loop-police:detection") and, when configured, through two optional sinks:
+//   HOOK_CMD — external command run per detection with the JSON payload as its
+//              last argument, e.g. "node /path/to/hook.mjs". Split on
+//              whitespace (no shell), fire-and-forget, killed after
+//              HOOK_TIMEOUT_MS. Purely observational: exit code and output are
+//              ignored, it can never alter detection or recovery.
+//   HOOK_LOG — path to a JSONL file (relative paths resolve against the
+//              session cwd); one payload line is appended per detection.
 const STRING_DEFAULTS = {
   TOOL_LOOP_EXEMPT: "",
+  HOOK_CMD: "",
+  HOOK_LOG: "",
 };
 
 // Recovery messages injected into the agent when a loop is detected. Edit these
@@ -160,6 +172,9 @@ export default function (pi: ExtensionAPI) {
   let fileReadTotals = new Map<string, number>(); // path → total reads across all ranges
   let searchPatternPaths = new Map<string, Set<string>>();
   let consecutiveLoopCount = 0;
+  let turnIndex = 0;
+  let hookWarned = false;
+  let logWarned = false;
 
   // Per-stream detector state: stride checkpoints + incremental semantic scan.
   // Reset whenever a new assistant message (or a new block) starts streaming.
@@ -183,11 +198,70 @@ export default function (pi: ExtensionAPI) {
     fileReadTotals = new Map();
     searchPatternPaths = new Map();
     consecutiveLoopCount = 0;
+    hookWarned = false;
+    logWarned = false;
+  }
+
+  // Fan a detection out to the three observer channels: the extension event
+  // bus (always), HOOK_CMD, and HOOK_LOG (each only when configured). None of
+  // them can block or alter detection/recovery — the hook process is
+  // fire-and-forget and failures surface as a single notify per session.
+  function emitDetection(ctx: ExtensionContext, event: string, details: Record<string, unknown>) {
+    const payload = buildDetectionPayload(event, details, {
+      model: ctx.model
+        ? { id: ctx.model.id, name: ctx.model.name, provider: ctx.model.provider }
+        : null,
+      sessionId: ctx.sessionManager.getSessionId(),
+      sessionFile: ctx.sessionManager.getSessionFile() ?? null,
+      cwd: ctx.cwd,
+      turnIndex,
+      consecutiveLoops: consecutiveLoopCount,
+    });
+
+    pi.events.emit("loop-police:detection", payload);
+
+    const hook = splitHookCmd(String(cfg.HOOK_CMD ?? ""));
+    if (hook) {
+      const timeout = Number(cfg.HOOK_TIMEOUT_MS) > 0 ? Number(cfg.HOOK_TIMEOUT_MS) : 5000;
+      pi.exec(hook.command, [...hook.args, JSON.stringify(payload)], { timeout })
+        .then((r) => {
+          if (r.code !== 0 && !hookWarned) {
+            hookWarned = true;
+            ctx.ui.notify(
+              `loop-police: HOOK_CMD exited ${r.code}${r.killed ? " (killed on timeout)" : ""}`,
+              "warning"
+            );
+          }
+        })
+        .catch((err) => {
+          if (!hookWarned) {
+            hookWarned = true;
+            ctx.ui.notify(`loop-police: HOOK_CMD failed — ${err}`, "warning");
+          }
+        });
+    }
+
+    const log = String(cfg.HOOK_LOG ?? "").trim();
+    if (log) {
+      try {
+        appendFileSync(
+          isAbsolute(log) ? log : resolve(ctx.cwd, log),
+          JSON.stringify(payload) + "\n",
+          "utf-8"
+        );
+      } catch (err) {
+        if (!logWarned) {
+          logWarned = true;
+          ctx.ui.notify(`loop-police: cannot write HOOK_LOG — ${err}`, "warning");
+        }
+      }
+    }
   }
 
   pi.on("agent_start", reset);
 
-  pi.on("turn_start", () => {
+  pi.on("turn_start", (event) => {
+    turnIndex = event.turnIndex;
     resetStreamState();
     streamAborted = false;
     cleanStreamPrefix = null;
@@ -268,7 +342,7 @@ export default function (pi: ExtensionAPI) {
     }
   });
 
-  pi.on("message_end", (event, _ctx) => {
+  pi.on("message_end", (event, ctx) => {
     if (event.message.role !== "assistant") return;
 
     if (streamAborted) {
@@ -285,10 +359,11 @@ export default function (pi: ExtensionAPI) {
           : loopKind === "semantic"
             ? "[SEMANTIC LOOP — truncated by loop-police]"
             : "[THINKING LOOP — truncated by loop-police]";
-      const advice =
-        cfg.CONSECUTIVE_LOOP_LIMIT > 0 && consecutiveLoopCount >= cfg.CONSECUTIVE_LOOP_LIMIT
-          ? fmt(cfg.MSG_CONSECUTIVE_LOOP, { count: consecutiveLoopCount })
-          : loopStream === "output"
+      const escalated =
+        cfg.CONSECUTIVE_LOOP_LIMIT > 0 && consecutiveLoopCount >= cfg.CONSECUTIVE_LOOP_LIMIT;
+      const advice = escalated
+        ? fmt(cfg.MSG_CONSECUTIVE_LOOP, { count: consecutiveLoopCount })
+        : loopStream === "output"
             ? String(loopKind === "semantic" ? cfg.MSG_OUTPUT_SEMANTIC_LOOP : cfg.MSG_OUTPUT_LOOP)
             : String(loopKind === "semantic" ? cfg.MSG_SEMANTIC_LOOP : cfg.MSG_THINKING_LOOP);
 
@@ -296,6 +371,17 @@ export default function (pi: ExtensionAPI) {
         loopStream === "output"
           ? replaceText(event.message, `${prefix}\n\n${label}`)
           : replaceThinking(event.message, `${prefix}\n\n${label}`);
+      emitDetection(
+        ctx,
+        loopStream === "output"
+          ? loopKind === "semantic"
+            ? "output_semantic_loop"
+            : "output_loop"
+          : loopKind === "semantic"
+            ? "semantic_loop"
+            : "thinking_loop",
+        { stream: loopStream, kind: loopKind, escalated }
+      );
       pi.sendMessage(
         { customType: "loop-police", content: withSuffix(advice), display: true },
         { triggerTurn: true }
@@ -322,6 +408,10 @@ export default function (pi: ExtensionAPI) {
         );
         if (stagnant) {
           thinkingHistory = [];
+          emitDetection(ctx, "stagnation", {
+            window: cfg.STAGNATION_WINDOW,
+            threshold: cfg.STAGNATION_THRESHOLD,
+          });
           pi.sendMessage(
             {
               customType: "loop-police",
@@ -356,6 +446,7 @@ export default function (pi: ExtensionAPI) {
         fileReadTotals.set(path, total);
         if (cfg.FILE_READ_LIMIT > 0 && count >= cfg.FILE_READ_LIMIT) {
           ctx.ui.notify(`⚠️ FILE READ LOOP: "${path}" read ${count}x (same range) — blocked`, "warning");
+          emitDetection(ctx, "file_read_loop", { toolName: event.toolName, path, count });
           pi.sendMessage(
             {
               customType: "loop-police",
@@ -368,6 +459,7 @@ export default function (pi: ExtensionAPI) {
         }
         if (cfg.FILE_SCAN_LIMIT > 0 && total >= cfg.FILE_SCAN_LIMIT) {
           ctx.ui.notify(`⚠️ FILE READ CEILING: "${path}" read ${total}x total — blocked`, "warning");
+          emitDetection(ctx, "file_scan_loop", { toolName: event.toolName, path, count: total });
           pi.sendMessage(
             {
               customType: "loop-police",
@@ -391,6 +483,11 @@ export default function (pi: ExtensionAPI) {
         searchPatternPaths.set(pattern, paths);
         if (paths.size >= cfg.SEARCH_EXPAND_LIMIT) {
           ctx.ui.notify(`⚠️ SEARCH SPIRAL: "${pattern}" across ${paths.size} paths — blocked`, "warning");
+          emitDetection(ctx, "search_spiral", {
+            toolName: event.toolName,
+            pattern,
+            paths: paths.size,
+          });
           pi.sendMessage(
             {
               customType: "loop-police",
@@ -421,6 +518,7 @@ export default function (pi: ExtensionAPI) {
     // call stays blocked for the rest of the session, no matter what.
     if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
       ctx.ui.notify(`⚠️ TOOL LOOP: identical call blocked (banned)`, "warning");
+      emitDetection(ctx, "tool_loop", { toolName: event.toolName, windowSize: 1, banned: true });
       return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 })) };
     }
 
@@ -428,6 +526,11 @@ export default function (pi: ExtensionAPI) {
     if (windowSize > 0) {
       if (cfg.TOOL_LOOP_BAN >= 2) bannedCalls.add(hash);
       ctx.ui.notify(`⚠️ TOOL LOOP: ${windowSize}-call sequence repeating — blocked`, "warning");
+      emitDetection(ctx, "tool_loop", {
+        toolName: event.toolName,
+        windowSize,
+        banned: cfg.TOOL_LOOP_BAN >= 2,
+      });
       // Do NOT record the blocked call: toolHistory stays at the looping state
       // so a renewed identical attempt trips the detector again in place. The
       // moment the model does something different, adjacency breaks and the
@@ -749,6 +852,32 @@ function detectSequenceRepeat(history: string[]): number {
     if (prev.length === w && tail.every((v, i) => v === prev[i])) return w;
   }
   return 0;
+}
+
+// Splits HOOK_CMD on whitespace into executable + fixed args, so interpreters
+// work everywhere ("node /path/hook.mjs", "python C:\\hooks\\loop.py"). The
+// command runs without a shell, which also means paths containing spaces are
+// not supported. Returns null when the config is blank (hook disabled).
+function splitHookCmd(cmd: string): { command: string; args: string[] } | null {
+  const parts = cmd.trim().split(/\s+/).filter(Boolean);
+  return parts.length === 0 ? null : { command: parts[0], args: parts.slice(1) };
+}
+
+// The payload delivered to every observer channel. This shape is public API
+// (external hooks and other extensions parse it) — fields must not be renamed.
+function buildDetectionPayload(
+  event: string,
+  details: Record<string, unknown>,
+  info: {
+    model: { id: string; name: string; provider: string } | null;
+    sessionId: string;
+    sessionFile: string | null;
+    cwd: string;
+    turnIndex: number;
+    consecutiveLoops: number;
+  }
+) {
+  return { event, timestamp: new Date().toISOString(), ...info, details };
 }
 
 function hashToolCall(toolName: string, input: unknown): string {

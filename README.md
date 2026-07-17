@@ -108,6 +108,9 @@ SEARCH_EXPAND_LIMIT: 3      // distinct paths for the same search pattern before
 CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalates
 TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
 TOOL_LOOP_EXEMPT: ""        // tool names exempt from the tool call loop detector
+HOOK_CMD: ""                // external command run on every detection (see Detection hooks)
+HOOK_TIMEOUT_MS: 5000       // HOOK_CMD is killed after this many ms
+HOOK_LOG: ""                // JSONL file appended on every detection (see Detection hooks)
 ```
 
 Tuning rules of thumb:
@@ -160,6 +163,70 @@ The text injected when a loop is detected is configurable — some models respon
   "MSG_SUFFIX": "Before continuing, consult the advisor extension: run /advisor with a one-line summary of what you were stuck on."
 }
 ```
+
+## Detection hooks
+
+Every detection also emits a structured payload to up to three observer channels, so you can build notifications, debugging artifacts, or analytics on top of loop-police without touching it. All three are purely observational: they can never block, delay, or alter detection and recovery.
+
+The payload:
+
+```json
+{
+  "event": "tool_loop",
+  "timestamp": "2026-07-17T14:03:22.123Z",
+  "model": { "id": "qwen3:14b", "name": "Qwen3 14B", "provider": "ollama" },
+  "sessionId": "…",
+  "sessionFile": "/path/to/session.jsonl",
+  "cwd": "/path/to/project",
+  "turnIndex": 12,
+  "consecutiveLoops": 0,
+  "details": { "toolName": "bash", "windowSize": 3, "banned": false }
+}
+```
+
+`event` is one of `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_read_loop`, `file_scan_loop`, `search_spiral`, `tool_loop`. `model` is `null` when no model is selected. `details` is event-specific: the stream loops carry `{ stream, kind, escalated }` (`escalated: true` when the consecutive-loop message fired), `stagnation` carries `{ window, threshold }`, the file detectors `{ toolName, path, count }`, `search_spiral` `{ toolName, pattern, paths }`, and `tool_loop` `{ toolName, windowSize, banned }`. The payload carries metadata only — never the thinking text or tool arguments; a hook that wants the transcript can read it from `sessionFile`.
+
+### `HOOK_CMD` — run an external command
+
+```
+/loop-police set HOOK_CMD=node /path/to/hook.mjs
+```
+
+The command runs fire-and-forget on every detection with the JSON payload as its **last argument**, and is killed after `HOOK_TIMEOUT_MS` (5000). It is spawned directly without a shell — the JSON arrives verbatim no matter what it contains, and `HOOK_CMD` is split on whitespace into executable + fixed arguments (so interpreter forms like `python C:\hooks\loop.py` work everywhere; paths containing spaces are not supported). Exit code and output are ignored, but a failing hook shows a one-time warning per session so you notice while developing one.
+
+Any language works:
+
+```bash
+#!/bin/bash                       # notify.sh — HOOK_CMD=/path/to/notify.sh
+event=$(echo "$1" | jq -r .event)
+notify-send "loop-police" "$event detected"
+```
+
+[`examples/hook.mjs`](examples/hook.mjs) is a ready-to-use hook that pushes a phone/desktop notification via [ntfy.sh](https://ntfy.sh) — copy it, set `LOOP_POLICE_NTFY_TOPIC`, and point `HOOK_CMD` at it.
+
+### `HOOK_LOG` — statistics with zero code
+
+```
+/loop-police set HOOK_LOG=/home/user/.pi/loop-stats.jsonl
+```
+
+Appends one payload line per detection (relative paths resolve against the session cwd). Point every project at the same absolute path and the answer to "which model and which detector fire the most" is a one-liner:
+
+```bash
+jq -r '"\(.model.id // "?") \(.event)"' loop-stats.jsonl | sort | uniq -c | sort -rn
+```
+
+`sessionId` and `turnIndex` in each line let you trace any detection back to the exact chat and turn; `sessionFile` points at the full transcript.
+
+### `loop-police:detection` — the extension event bus
+
+Other pi extensions can subscribe in-process, no config needed — loop-police always emits on pi's shared bus:
+
+```typescript
+pi.events.on("loop-police:detection", (payload) => { /* … */ });
+```
+
+This is the richest integration point: a listening extension has the full `ExtensionAPI`, so it can switch models, show UI, or send messages — things an external process cannot. [`examples/listener-extension.ts`](examples/listener-extension.ts) is a complete example that keeps a per-session loop counter in the status bar; copy it into your pi extensions directory to use it.
 
 ## Skills
 
