@@ -208,11 +208,16 @@ function getInputPath(input) {
   return input.path ?? input.file_path ?? input.filename ?? input.file ?? input.directory ?? input.dir ?? null;
 }
 
+const PATH_KEYS = new Set(["path", "file_path", "filename", "file", "directory", "dir"]);
+
 function getReadRange(input) {
   if (typeof input !== "object" || !input) return "";
   const start = input.offset ?? input.start_line ?? input.startLine ?? null;
   const end = input.limit ?? input.end_line ?? input.endLine ?? null;
-  return start === null && end === null ? "" : `${start ?? ""}:${end ?? ""}`;
+  if (start !== null || end !== null) return `${start ?? ""}:${end ?? ""}`;
+  const rest = {};
+  for (const k of Object.keys(input)) if (!PATH_KEYS.has(k)) rest[k] = input[k];
+  return Object.keys(rest).length === 0 ? "" : stableStringify(rest);
 }
 
 function getSearchPattern(input) {
@@ -647,6 +652,22 @@ describe("getReadRange", () => {
   test("offset 0 is a range, not absent", () => assert.equal(getReadRange({ offset: 0, limit: 50 }), "0:50"));
   test("no range fields → empty string", () => assert.equal(getReadRange({ path: "/f" }), ""));
   test("null → empty string", () => assert.equal(getReadRange(null), ""));
+  // Issue #6: read_symbol-style tools address content by symbol name, not line
+  // range — different symbols in the same file must not collide.
+  test("different non-range params → different keys", () =>
+    assert.notEqual(
+      getReadRange({ file_path: "src/flagger.ts", name: "combineScores" }),
+      getReadRange({ file_path: "src/flagger.ts", name: "runMLFlagger" })
+    ));
+  test("same non-range params → same key", () =>
+    assert.equal(
+      getReadRange({ file_path: "src/flagger.ts", name: "combineScores" }),
+      getReadRange({ name: "combineScores", file_path: "src/flagger.ts" })
+    ));
+  test("non-range params vs path-only differ", () =>
+    assert.notEqual(getReadRange({ path: "/f", name: "x" }), getReadRange({ path: "/f" })));
+  test("all path-key aliases excluded from fallback key", () =>
+    assert.equal(getReadRange({ file: "/f", directory: "/d", filename: "f" }), ""));
   test("distinct offsets give distinct keys", () =>
     assert.notEqual(getReadRange({ offset: 0, limit: 50 }), getReadRange({ offset: 50, limit: 50 })));
   test("same range gives the same key", () =>

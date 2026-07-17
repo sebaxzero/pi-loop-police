@@ -587,16 +587,26 @@ function getInputPath(input: unknown): string | null {
   return inp.path ?? inp.file_path ?? inp.filename ?? inp.file ?? inp.directory ?? inp.dir ?? null;
 }
 
-// Normalizes the line range of a read call to a "start:end" string ("" when
-// the tool has no range fields — then every read of the path is "the same
-// range"). Field names cover the common read-tool schemas (offset/limit,
-// start_line/end_line, startLine/endLine).
+// Input keys that identify the file being read (see getInputPath) — excluded
+// from the no-range-fields fallback in getReadRange.
+const PATH_KEYS = new Set(["path", "file_path", "filename", "file", "directory", "dir"]);
+
+// Normalizes the line range of a read call to a "start:end" string. Field
+// names cover the common read-tool schemas (offset/limit, start_line/end_line,
+// startLine/endLine). When the tool has no range fields, the remaining
+// non-path input fields become the key instead — read-style tools addressed by
+// something other than lines (e.g. a symbol name) read *different* content
+// with different params, so those reads must not collide. A path-only input
+// still keys to "": every read of the path IS the same read.
 function getReadRange(input: unknown): string {
   if (typeof input !== "object" || !input) return "";
   const inp = input as any;
   const start = inp.offset ?? inp.start_line ?? inp.startLine ?? null;
   const end = inp.limit ?? inp.end_line ?? inp.endLine ?? null;
-  return start === null && end === null ? "" : `${start ?? ""}:${end ?? ""}`;
+  if (start !== null || end !== null) return `${start ?? ""}:${end ?? ""}`;
+  const rest: Record<string, unknown> = {};
+  for (const k of Object.keys(inp)) if (!PATH_KEYS.has(k)) rest[k] = inp[k];
+  return Object.keys(rest).length === 0 ? "" : stableStringify(rest);
 }
 
 function getSearchPattern(input: unknown): string | null {
