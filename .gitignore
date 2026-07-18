@@ -10,3 +10,6 @@ extensions/loop-police.json
 # Its logic and test suite live in the tracked logic.shared.js / suite.shared.js
 # (shared with test.mjs), so only this HTML shell stays untracked.
 playground.html
+
+# Local working notes, never published
+todo.md
