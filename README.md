@@ -202,7 +202,7 @@ event=$(echo "$1" | jq -r .event)
 notify-send "loop-police" "$event detected"
 ```
 
-[`examples/hook.mjs`](examples/hook.mjs) is a ready-to-use hook that pushes a phone/desktop notification via [ntfy.sh](https://ntfy.sh) — copy it, set `LOOP_POLICE_NTFY_TOPIC`, and point `HOOK_CMD` at it.
+[`examples/hook.mjs`](examples/hook.mjs) is a ready-to-use hook that shows a desktop notification using only what the OS ships — a Windows toast, macOS `osascript`, or Linux `notify-send`; no npm packages, no external services. Copy it and point `HOOK_CMD` at it. Optionally set `LOOP_POLICE_NTFY_TOPIC` to also push to a phone via [ntfy.sh](https://ntfy.sh).
 
 ### `HOOK_LOG` — statistics with zero code
 
