@@ -6,5 +6,7 @@ node_modules/
 # so it must never be tracked (a tracked copy gets clobbered on pi update)
 extensions/loop-police.json
 
-# Local-only playground for manually exercising the detectors in a browser
+# Local-only playground UI for manually exercising the detectors in a browser.
+# Its logic and test suite live in the tracked logic.shared.js / suite.shared.js
+# (shared with test.mjs), so only this HTML shell stays untracked.
 playground.html
