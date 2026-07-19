@@ -26,7 +26,7 @@ No dependencies, no build step, nothing to configure — it starts protecting th
 
 ## What it detects
 
-Eight detectors, all enabled out of the box:
+Nine detectors, all enabled out of the box:
 
 | Detector | Fires when | What happens |
 |----------|-----------|--------------|
@@ -38,6 +38,7 @@ Eight detectors, all enabled out of the box:
 | **File read ceiling** | the same file path is read 20 times total (only reads that actually ran count) | tool call blocked |
 | **Search spiral** | the same pattern is searched in 3 different locations | tool call blocked |
 | **Tool call loop** | an identical sequence of tool calls repeats back-to-back | tool call blocked in place |
+| **Re-derived reasoning** | right after any detection, the model's thinking re-derives the same reasoning that led to it (≥ 85% similar) | reasoning trimmed from context, recovery message |
 
 ### Streaming loops (thinking and output)
 
@@ -75,6 +76,14 @@ Two knobs adjust this detector:
 - `TOOL_LOOP_BAN: 2` makes blocks **permanent per call** — once a specific call loops, that exact call stays blocked for the rest of the session (stronger against stubborn models, but it also blocks legitimate later re-runs). `1` (default) blocks only while the call is repeated back-to-back; `0` disables the detector.
 - `TOOL_LOOP_EXEMPT` — comma-separated tool names (case-insensitive) that are never blocked, e.g. `"bash,run_tests"` for polling a build or re-running a flaky test. Exempt calls still enter the history, so they keep breaking adjacency for other tools.
 
+### Re-derived reasoning guard
+
+Blocking an action doesn't remove the reasoning that produced it. Larger models read a block message and pivot; small models re-read their own stale plan in context, arrive at the same conclusion, and try the exact same thing again — block, re-derive, retry, forever.
+
+So after **any** detection fires, the guard watches the model's next message: if its thinking is ≥ `REDERIVE_THRESHOLD` (85%) Jaccard-similar to the reasoning that led to the detection, that thinking is **excised from context** — replaced with `[REDERIVED REASONING — trimmed by loop-police: …]` — and a recovery message tells the model not to reconstruct it and to take a different action, delegate, or ask the user. The guard stays armed after a trim, so re-deriving the same plan again escalates to a `⚠️ STUCK ({count}x)` message instead of cycling silently. Genuinely different reasoning disarms it.
+
+This is the fix for the "stuck on reasoning loops" failure mode ([#8](https://github.com/sebaxzero/pi-loop-police/issues/8)): interrupting the *action* is not enough for small models — the reasoning itself has to go.
+
 ## Commands
 
 ```
@@ -107,6 +116,7 @@ SEARCH_EXPAND_LIMIT: 3      // distinct paths for the same search pattern before
 CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalates
 TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
 TOOL_LOOP_EXEMPT: ""        // tool names exempt from the tool call loop detector
+REDERIVE_THRESHOLD: 0.85    // post-detection thinking this similar to the blocked plan is trimmed
 HOOK_CMD: ""                // external command run on every detection (see Detection hooks)
 HOOK_TIMEOUT_MS: 5000       // HOOK_CMD is killed after this many ms
 HOOK_LOG: ""                // JSONL file appended on every detection (see Detection hooks)
@@ -133,6 +143,7 @@ Setting a detector's key to `0` turns it off entirely:
 | `SEARCH_EXPAND_LIMIT=0` | search expansion spiral |
 | `CONSECUTIVE_LOOP_LIMIT=0` | escalated consecutive-loop message |
 | `TOOL_LOOP_BAN=0` | tool call sequence loop |
+| `REDERIVE_THRESHOLD=0` | re-derived reasoning guard |
 
 ### Customizing recovery messages
 
@@ -149,6 +160,8 @@ The text injected when a loop is detected is configurable — some models respon
 | `MSG_FILE_SCAN_LOOP` | same file read too many times in total (all ranges) | `{path}` `{count}` |
 | `MSG_SEARCH_SPIRAL` | search pattern spread across too many paths | `{pattern}` `{paths}` |
 | `MSG_TOOL_LOOP` | identical tool-call sequence repeating | `{windowSize}` |
+| `MSG_REDERIVED` | post-detection reasoning re-derived and trimmed | — |
+| `MSG_STUCK` | the same blocked plan re-derived `{count}` times in a row | `{count}` |
 | `MSG_SUFFIX` | appended to **every** message above (empty by default) | — |
 
 `{placeholder}` tokens are substituted at runtime; unknown tokens are left as-is so a typo stays visible. Messages are edited in `loop-police.json` only — `/loop-police set` handles numeric keys (plus `TOOL_LOOP_EXEMPT`) and will refuse a `MSG_*` key.
@@ -181,7 +194,7 @@ The payload:
 }
 ```
 
-`event` is one of `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_scan_loop`, `search_spiral`, `tool_loop`. `model` is `null` when no model is selected. `details` is event-specific: the stream loops carry `{ stream, kind, escalated }` (`escalated: true` when the consecutive-loop message fired), `stagnation` carries `{ window, threshold }`, `file_scan_loop` `{ toolName, path, count }`, `search_spiral` `{ toolName, pattern, paths }`, and `tool_loop` `{ toolName, windowSize, banned }`. The payload carries metadata only — never the thinking text or tool arguments; a hook that wants the transcript can read it from `sessionFile`.
+`event` is one of `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_scan_loop`, `search_spiral`, `tool_loop`, `rederived_reasoning`. `model` is `null` when no model is selected. `details` is event-specific: the stream loops carry `{ stream, kind, escalated }` (`escalated: true` when the consecutive-loop message fired), `stagnation` carries `{ window, threshold }`, `file_scan_loop` `{ toolName, path, count }`, `search_spiral` `{ toolName, pattern, paths }`, `tool_loop` `{ toolName, windowSize, banned }`, and `rederived_reasoning` `{ streak }`. The payload carries metadata only — never the thinking text or tool arguments; a hook that wants the transcript can read it from `sessionFile`.
 
 ### `HOOK_CMD` — run an external command
 

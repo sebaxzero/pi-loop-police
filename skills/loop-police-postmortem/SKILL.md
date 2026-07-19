@@ -29,6 +29,7 @@ leaves a distinct trace:
 | File read ceiling | blocked call with `loop-police: file read {count}x total — {path}` + `⚠️ FILE READ CEILING` warning (sessions from < 1.12.0 may also show the removed same-range detector: `loop-police: file read {count}x — {path}` + `⚠️ FILE READ LOOP`) |
 | Search spiral | blocked call with `loop-police: search spiral "{pattern}"` + `⚠️ SEARCH EXPANSION SPIRAL` warning |
 | Tool call loop | blocked call whose result is the `⚠️ TOOL CALL LOOP` message (`{windowSize}`-call sequence) — no separate warning turn |
+| Re-derived reasoning | assistant thinking replaced entirely by `[REDERIVED REASONING — trimmed by loop-police: …]` + a `⚠️ REDERIVED REASONING` warning, or `⚠️ STUCK ({count}x)` when it repeated |
 
 Note: the user may have customized the `MSG_*` templates, so match on the
 block-reason prefixes (`loop-police: ...`) and the truncation labels first;
@@ -46,14 +47,14 @@ If none is readable, use the defaults: `THINKING_WINDOW=80`,
 `OUTPUT_WINDOW=100`, `MAX_WINDOW=4000`, `STRIDE=50`, `PARA_MIN_LEN=40`,
 `FINGERPRINT_LEN=60`, `SEMANTIC_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
 `STAGNATION_THRESHOLD=0.85`, `FILE_SCAN_LIMIT=20`, `SEARCH_EXPAND_LIMIT=3`,
-`CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`. (Configs written before 1.8.0
+`CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`, `REDERIVE_THRESHOLD=0.85`. (Configs written before 1.8.0
 may still show the old names `MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`,
 `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`,
 `PARA_LOOP_THRESHOLD` — they map 1:1 onto the new ones and are migrated
 automatically on next load.) A value of `0` on
 `THINKING_WINDOW`, `OUTPUT_WINDOW`, `SEMANTIC_THRESHOLD`, `STAGNATION_WINDOW`,
-`FILE_SCAN_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT` or
-`TOOL_LOOP_BAN` means that detector is disabled — a disabled detector cannot
+`FILE_SCAN_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT`,
+`TOOL_LOOP_BAN` or `REDERIVE_THRESHOLD` means that detector is disabled — a disabled detector cannot
 have fired, so skip it (`SEMANTIC_THRESHOLD=0` disables the semantic detector
 on both streams). Keep in mind the session may
 also carry `/loop-police set` overrides the JSON does not show — if the user
@@ -118,6 +119,10 @@ Evidence patterns for **false positives**, per detector:
   explicitly asked for repeated content.
 - **Stagnation**: a genuinely repetitive batch task (applying the same
   change to N files) where similar thinking across turns *is* progress.
+- **Re-derived reasoning**: after a justified block, the model's next
+  thinking legitimately had to restate the situation (e.g. summarizing the
+  blocker to the user) and collided with the similarity threshold — check
+  whether the trimmed message was actually a pivot, not a retry.
 
 ## Phase 4 — Recommend
 
@@ -133,6 +138,8 @@ Map each non-justified verdict to a config change:
 | Character FP | raise `THINKING_WINDOW` (80 → 120–160) |
 | Output loop FP | raise `OUTPUT_WINDOW` (100 → 200–400); `OUTPUT_WINDOW=0` only if the user explicitly wants it off |
 | Stagnation FP | raise `STAGNATION_THRESHOLD` (0.85 → 0.90–0.95) or `STAGNATION_WINDOW` (4 → 6) |
+| Re-derived reasoning FP | raise `REDERIVE_THRESHOLD` (0.85 → 0.90–0.95); `REDERIVE_THRESHOLD=0` only if the user explicitly wants the guard off |
+| Re-derived reasoning ineffective (`⚠️ STUCK` keeps escalating) | reword `MSG_STUCK` for this model; the model may simply be too small to pivot — suggest the user intervene or switch models |
 | Stream loop ineffective / `CONSECUTIVE LOOP` seen | reword the corresponding `MSG_*` template for this model (shorter, more imperative, name the alternative action); or lower `CONSECUTIVE_LOOP_LIMIT` to escalate sooner |
 | Loops detected *late* (long truncated prefix already wasted) | lower `THINKING_WINDOW`/`OUTPUT_WINDOW`, or lower `SEMANTIC_THRESHOLD` if the semantic layer caught what the character layer missed |
 

@@ -20,6 +20,7 @@ loops in real time before they exhaust your context window.
 - **File read ceiling**: same file read ≥ FILE_SCAN_LIMIT times in total, across all line ranges — only reads that actually ran count (blocked calls don't); identical back-to-back re-reads are the tool call loop's case
 - **Search spiral**: same pattern searched across ≥ SEARCH_EXPAND_LIMIT paths
 - **Tool call loop**: identical sequence of tool calls repeating
+- **Re-derived reasoning**: right after any detection, the model's thinking re-derives the same reasoning that led to it (≥ REDERIVE_THRESHOLD similar) — that thinking is trimmed from context
 - **Consecutive loop**: stream loop aborted N turns in a row (escalated warning)
 
 ## Commands
@@ -48,11 +49,12 @@ loops in real time before they exhaust your context window.
 | `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N stream-loop aborts in a row (across turns) |
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
 | `TOOL_LOOP_EXEMPT` | `""` | Comma-separated tool names exempt from the tool call loop detector (case-insensitive exact match, e.g. `bash,run_tests`); exempt calls are never blocked but still break adjacency for other tools |
+| `REDERIVE_THRESHOLD` | `0.85` | After any detection, thinking this Jaccard-similar to the reasoning that led to it is trimmed from context (re-derived reasoning guard) |
 | `HOOK_CMD` | `""` | External command run fire-and-forget on every detection with the JSON payload as its last argument (split on whitespace, no shell — e.g. `node /path/hook.mjs`); observational only, never affects detection |
 | `HOOK_TIMEOUT_MS` | `5000` | `HOOK_CMD` is killed after this many ms |
 | `HOOK_LOG` | `""` | Path to a JSONL file; one payload line appended per detection (relative paths resolve against the session cwd) |
 
-Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_SCAN_LIMIT=0` (file read ceiling), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop).
+Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_SCAN_LIMIT=0` (file read ceiling), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop), `REDERIVE_THRESHOLD=0` (re-derived reasoning guard).
 
 Pre-1.8.0 configs used other names (`MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`, `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`, `PARA_LOOP_THRESHOLD`) — they are migrated automatically on load. Pre-1.12.0 configs may still carry `FILE_READ_LIMIT` / `MSG_FILE_READ_LOOP` (the removed same-range detector) — they are dropped automatically on load.
 
@@ -73,6 +75,8 @@ settable via `/loop-police set`. `{placeholders}` are filled at runtime:
 | `MSG_FILE_SCAN_LOOP` | `{path}` `{count}` |
 | `MSG_SEARCH_SPIRAL` | `{pattern}` `{paths}` |
 | `MSG_TOOL_LOOP` | `{windowSize}` |
+| `MSG_REDERIVED` | — |
+| `MSG_STUCK` | `{count}` |
 | `MSG_SUFFIX` | — (appended to every recovery message; empty by default — use it to point the model at an advisor extension/tool on any detection) |
 
 ## Changing config
@@ -116,4 +120,4 @@ Every detection emits a JSON payload (`event`, `timestamp`, `model`, `sessionId`
 - **`HOOK_CMD`** — external command per detection, payload as last argument (any language; see `examples/hook.mjs` in the repo).
 - **`HOOK_LOG`** — JSONL append per detection; ideal for stats like which model/detector fires most (`jq -r '"\(.model.id) \(.event)"' file | sort | uniq -c`).
 
-The `event` field matches the detector: `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_scan_loop`, `search_spiral`, `tool_loop`. See the README's "Detection hooks" section for the full payload schema and per-event `details`.
+The `event` field matches the detector: `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_scan_loop`, `search_spiral`, `tool_loop`, `rederived_reasoning`. See the README's "Detection hooks" section for the full payload schema and per-event `details`.

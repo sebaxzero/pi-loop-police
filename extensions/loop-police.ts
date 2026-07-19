@@ -18,6 +18,7 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 //   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
 //   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
 //   TOOL_LOOP_BAN=0          → tool call sequence loop off
+//   REDERIVE_THRESHOLD=0     → re-derived reasoning guard off
 const NUMERIC_DEFAULTS = {
   THINKING_WINDOW: 80,
   OUTPUT_WINDOW: 100,
@@ -35,6 +36,10 @@ const NUMERIC_DEFAULTS = {
   TOOL_LOOP_BAN: 1, // 0 = detector off;
   //                   1 = block identical call only while repeated back-to-back;
   //                   2 = ban that exact call for the rest of the session
+  REDERIVE_THRESHOLD: 0.85, // after any detection, thinking this Jaccard-similar
+  //                           to the reasoning that led to it is trimmed from
+  //                           context — small models otherwise re-read their own
+  //                           stale plan and retry the blocked action (issue #8)
   HOOK_TIMEOUT_MS: 5000, // HOOK_CMD is killed after this many ms
 };
 
@@ -65,6 +70,7 @@ const STRING_DEFAULTS = {
 //   MSG_FILE_SCAN_LOOP   → {path} {count}
 //   MSG_SEARCH_SPIRAL    → {pattern} {paths}
 //   MSG_TOOL_LOOP        → {windowSize}
+//   MSG_STUCK            → {count}
 // MSG_SUFFIX, when non-empty, is appended (after a blank line) to EVERY
 // recovery message — use it to point the model at an advisor, e.g.
 // "Consult the advisor extension: run /advisor before continuing."
@@ -87,6 +93,10 @@ const MESSAGE_DEFAULTS = {
     '⚠️ SEARCH EXPANSION SPIRAL: Pattern "{pattern}" has been searched in {paths} different locations. Broadening the scope further will not help — reconsider what you are looking for.',
   MSG_TOOL_LOOP:
     "⚠️ TOOL CALL LOOP: The same sequence of {windowSize} tool call(s) is repeating identically and has been blocked — this exact call did NOT run and will keep being blocked if you repeat it. It produced no new result last time and won't now. Change your approach: try a different command, or use what you already learned to move forward.",
+  MSG_REDERIVED:
+    "⚠️ REDERIVED REASONING: You just re-derived the same reasoning that led to a loop-police detection, so it has been trimmed from your context. Do NOT reconstruct it. Take a DIFFERENT concrete action, or report the blocker to the user and ask how to proceed.",
+  MSG_STUCK:
+    "⚠️ STUCK ({count}x): You have re-derived the same blocked plan {count} times and it keeps being removed. STOP — do not think about that conclusion again. Report to the user exactly what you were trying to do, why it is blocked, and ask how to proceed.",
   MSG_SUFFIX: "",
 };
 
@@ -176,6 +186,13 @@ export default function (pi: ExtensionAPI) {
   let thinkingHistory: string[] = [];
   let fileReadTotals = new Map<string, number>(); // path → reads that actually ran, all ranges
   let searchPatternPaths = new Map<string, Set<string>>();
+  // Re-derived reasoning guard (issue #8). Armed when any detector fires; the
+  // next clean assistant message's thinking is then compared against the
+  // reasoning that led to the detection (lastThinking) and trimmed from
+  // context when it is essentially the same plan re-derived.
+  let loopArmed = false;
+  let rederiveStreak = 0;
+  let lastThinking = "";
   let consecutiveLoopCount = 0;
   let turnIndex = 0;
   let hookWarned = false;
@@ -201,6 +218,9 @@ export default function (pi: ExtensionAPI) {
     thinkingHistory = [];
     fileReadTotals = new Map();
     searchPatternPaths = new Map();
+    loopArmed = false;
+    rederiveStreak = 0;
+    lastThinking = "";
     consecutiveLoopCount = 0;
     hookWarned = false;
     logWarned = false;
@@ -386,6 +406,13 @@ export default function (pi: ExtensionAPI) {
             : "thinking_loop",
         { stream: loopStream, kind: loopKind, escalated }
       );
+      // Arm the re-derive guard: the recovery turn is exactly where a small
+      // model re-derives the reasoning that was just cut. Compare against what
+      // survived — the clean prefix for thinking loops, the intact thinking
+      // block for output loops.
+      loopArmed = true;
+      const survivor = loopStream === "thinking" ? prefix : extractThinking(event.message);
+      if (survivor) lastThinking = survivor;
       pi.sendMessage(
         { customType: "loop-police", content: withSuffix(advice), display: true },
         { triggerTurn: true }
@@ -393,15 +420,55 @@ export default function (pi: ExtensionAPI) {
       return { message: cleaned };
     }
 
+    const thinking = extractThinking(event.message);
+
+    // Re-derived reasoning guard (issue #8): a detection just fired and this is
+    // the model's next message. Blocking a call (or truncating a stream) leaves
+    // the reasoning that produced it in context, so small models re-read their
+    // own stale plan, reach the same conclusion, and retry the same thing.
+    // If this message's thinking is essentially that reasoning again, excise it
+    // here — message_end is the only hook where returning {message} rewrites
+    // history — and tell the model not to reconstruct it. Stays armed after a
+    // trim so a renewed re-derivation escalates ({count}x) instead of cycling.
+    if (loopArmed) {
+      loopArmed = false;
+      if (
+        cfg.REDERIVE_THRESHOLD > 0 &&
+        thinking &&
+        lastThinking &&
+        jaccard(lastThinking, thinking) >= cfg.REDERIVE_THRESHOLD
+      ) {
+        rederiveStreak++;
+        loopArmed = true;
+        resetStreamState();
+        const advice =
+          rederiveStreak >= 2
+            ? fmt(cfg.MSG_STUCK, { count: rederiveStreak })
+            : String(cfg.MSG_REDERIVED);
+        emitDetection(ctx, "rederived_reasoning", { streak: rederiveStreak });
+        pi.sendMessage(
+          { customType: "loop-police", content: withSuffix(advice), display: true },
+          { triggerTurn: true }
+        );
+        return {
+          message: replaceThinking(
+            event.message,
+            "[REDERIVED REASONING — trimmed by loop-police: this conclusion was already reached and led to a detected loop. Do not reconstruct it.]"
+          ),
+        };
+      }
+      rederiveStreak = 0; // genuinely different reasoning — the model pivoted
+    }
+
     // Clean message — restart the per-stream detector state so the next
     // assistant message in this turn starts fresh (lengths reset to zero), and
     // clear the consecutive-loop escalation counter: the model is progressing.
     resetStreamState();
     consecutiveLoopCount = 0;
+    if (thinking) lastThinking = thinking;
 
     // Cross-turn stagnation: only run on clean (non-aborted) turns
     if (cfg.STAGNATION_WINDOW <= 0) return;
-    const thinking = extractThinking(event.message);
     if (thinking) {
       thinkingHistory.push(thinking);
       if (thinkingHistory.length > cfg.STAGNATION_WINDOW) thinkingHistory.shift();
@@ -412,6 +479,7 @@ export default function (pi: ExtensionAPI) {
         );
         if (stagnant) {
           thinkingHistory = [];
+          loopArmed = true; // lastThinking (this message) was set above
           emitDetection(ctx, "stagnation", {
             window: cfg.STAGNATION_WINDOW,
             threshold: cfg.STAGNATION_THRESHOLD,
@@ -449,6 +517,7 @@ export default function (pi: ExtensionAPI) {
       // exact call stays blocked for the rest of the session, no matter what.
       if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
         ctx.ui.notify(`⚠️ TOOL LOOP: identical call blocked (banned)`, "warning");
+        loopArmed = true;
         emitDetection(ctx, "tool_loop", { toolName: event.toolName, windowSize: 1, banned: true });
         return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 })) };
       }
@@ -456,6 +525,7 @@ export default function (pi: ExtensionAPI) {
       if (windowSize > 0) {
         if (cfg.TOOL_LOOP_BAN >= 2) bannedCalls.add(hash);
         ctx.ui.notify(`⚠️ TOOL LOOP: ${windowSize}-call sequence repeating — blocked`, "warning");
+        loopArmed = true;
         emitDetection(ctx, "tool_loop", {
           toolName: event.toolName,
           windowSize,
@@ -483,6 +553,7 @@ export default function (pi: ExtensionAPI) {
         const total = fileReadTotals.get(path) ?? 0;
         if (total >= cfg.FILE_SCAN_LIMIT) {
           ctx.ui.notify(`⚠️ FILE READ CEILING: "${path}" read ${total}x total — blocked`, "warning");
+          loopArmed = true;
           emitDetection(ctx, "file_scan_loop", { toolName: event.toolName, path, count: total });
           pi.sendMessage(
             {
@@ -508,6 +579,7 @@ export default function (pi: ExtensionAPI) {
         searchPatternPaths.set(pattern, paths);
         if (paths.size >= cfg.SEARCH_EXPAND_LIMIT) {
           ctx.ui.notify(`⚠️ SEARCH SPIRAL: "${pattern}" across ${paths.size} paths — blocked`, "warning");
+          loopArmed = true;
           emitDetection(ctx, "search_spiral", {
             toolName: event.toolName,
             pattern,
@@ -569,6 +641,7 @@ export default function (pi: ExtensionAPI) {
           `  tool history:        ${toolHistory.length} calls`,
           `  banned calls:        ${bannedCalls.size}`,
           `  stagnation history:  ${thinkingHistory.length}/${cfg.STAGNATION_WINDOW} turns`,
+          `  re-derive guard:     ${loopArmed ? "armed" : "idle"} (streak ${rederiveStreak})`,
           `  file reads tracked:  ${fileReadTotals.size} paths`,
           `  search patterns:     ${searchPatternPaths.size} patterns`,
           `  consecutive loops:   ${consecutiveLoopCount}/${cfg.CONSECUTIVE_LOOP_LIMIT}`,
