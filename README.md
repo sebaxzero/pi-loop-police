@@ -229,6 +229,10 @@ pi.events.on("loop-police:detection", (payload) => { /* … */ });
 
 This is the richest integration point: a listening extension has the full `ExtensionAPI`, so it can switch models, show UI, or send messages — things an external process cannot. [`examples/listener-extension.ts`](examples/listener-extension.ts) is a complete example that keeps a per-session loop counter in the status bar; copy it into your pi extensions directory to use it.
 
+### Examples
+
+- [pi-input-bar](https://github.com/sebaxzero/pi-input-bar) — subscribes to `loop-police:detection` and shows a per-session summary in the input editor's top border (`⚠ 10 loops (tool 7, think 3)`), grouped by detector family. Nothing is shown until a loop is caught, and the subscription is a no-op when loop-police isn't installed — a good template for optional integrations.
+
 ## Skills
 
 Two skills ship with the extension:
