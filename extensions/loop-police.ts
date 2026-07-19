@@ -542,7 +542,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.registerCommand("loop-police", {
-    description: "Show status; /loop-police reset; /loop-police set KEY=VAL [KEY=VAL ...]",
+    description: "Show status; /loop-police reset; /loop-police set KEY=VAL [KEY=VAL ...]; /loop-police save",
     handler: (args, ctx) => {
       const trimmed = args?.trim() ?? "";
 
@@ -552,13 +552,23 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
+      if (trimmed === "save") {
+        try {
+          writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2) + "\n", "utf-8");
+          ctx.ui.notify(`Loop Police: saved ${CONFIG_PATH}`, "info");
+        } catch (e) {
+          ctx.ui.notify(`Loop Police: could not save: ${e}`, "error");
+        }
+        return;
+      }
+
       if (trimmed.startsWith("set ")) {
         const results = trimmed
           .slice(4)
           .trim()
           .split(/\s+/)
           .map((pair) => setConfigValue(cfg, pair));
-        ctx.ui.notify(`Loop Police: ${results.join(", ")}`, "info");
+        ctx.ui.notify(`Loop Police: ${results.join(", ")} (session only; /loop-police save to persist)`, "info");
         return;
       }
 
@@ -573,7 +583,7 @@ export default function (pi: ExtensionAPI) {
           `  search patterns:     ${searchPatternPaths.size} patterns`,
           `  consecutive loops:   ${consecutiveLoopCount}/${cfg.CONSECUTIVE_LOOP_LIMIT}`,
           "",
-          "  config (set KEY=VAL to change):",
+          "  config (set KEY=VAL to change; save to persist):",
           ...Object.keys(NUMERIC_DEFAULTS).map((k) => `    ${k}=${cfg[k]}`),
           ...Object.keys(STRING_DEFAULTS).map((k) => `    ${k}="${cfg[k]}"`),
           "",

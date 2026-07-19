@@ -82,11 +82,12 @@ Two knobs adjust this detector:
 /loop-police                          — show current detection state and all config values
 /loop-police reset                    — clear all state (useful if a false positive fires)
 /loop-police set KEY=VAL [KEY=VAL …]  — tune config values live, no restart needed
+/loop-police save                     — write the current config to loop-police.json
 ```
 
 Example: `/loop-police set FILE_READ_LIMIT=6 STAGNATION_WINDOW=5`
 
-Changes made with `set` last for the session; persistent changes go in `loop-police.json` (see below).
+Changes made with `set` last for the session; `save` persists them to `loop-police.json` (see below).
 
 ## Configuration
 
