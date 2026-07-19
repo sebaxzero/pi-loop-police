@@ -22,9 +22,6 @@
   "bugs": {
     "url": "https://github.com/sebaxzero/pi-loop-police/issues"
   },
-  "scripts": {
-    "test": "node --test test.mjs"
-  },
   "pi": {
     "extensions": [
       "./extensions"
