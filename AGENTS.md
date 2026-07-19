@@ -86,19 +86,6 @@ Conventions:
 7. If the detection leaves a marker in the transcript (truncation label, block
    reason), keep its exact wording stable — the postmortem skill greps for it.
 
-## Testing
-
-Tests are **deliberately local-only**: `test.mjs`, `logic.shared.js`,
-`suite.shared.js` and `playground.html` are gitignored and CI runs no tests
-(GitHub Actions minutes are reserved for the tag-triggered `publish.yml`).
-The shared files hold one copy of the pure-logic functions and the full suite,
-consumed by both `node --test test.mjs` and the browser playground. If you are
-contributing without them, validate at minimum that the file still parses and
-loads: `node -e "import('./extensions/loop-police.ts')"` failing only with
-`ERR_MODULE_NOT_FOUND` for `@earendil-works/...` means the file itself is fine.
-Behavioral verification happens in a real pi session (install the extension
-from your branch and force a loop).
-
 ## Contributing
 
 - Issues and PRs at <https://github.com/sebaxzero/pi-loop-police>. For behavior
