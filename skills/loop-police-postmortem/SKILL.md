@@ -26,8 +26,7 @@ leaves a distinct trace:
 | Output semantic loop | response text ending in `[SEMANTIC OUTPUT LOOP — truncated by loop-police]` + `⚠️ OUTPUT SEMANTIC LOOP DETECTED` |
 | Consecutive loop (escalation) | `⚠️ CONSECUTIVE LOOP ({count}x)` warning |
 | Stagnation | `⚠️ REASONING STAGNATION` warning |
-| File read loop | blocked tool call whose result/reason contains `loop-police: file read {count}x — {path}` + `⚠️ FILE READ LOOP` warning |
-| File read ceiling | blocked call with `loop-police: file read {count}x total — {path}` + `⚠️ FILE READ CEILING` warning |
+| File read ceiling | blocked call with `loop-police: file read {count}x total — {path}` + `⚠️ FILE READ CEILING` warning (sessions from < 1.12.0 may also show the removed same-range detector: `loop-police: file read {count}x — {path}` + `⚠️ FILE READ LOOP`) |
 | Search spiral | blocked call with `loop-police: search spiral "{pattern}"` + `⚠️ SEARCH EXPANSION SPIRAL` warning |
 | Tool call loop | blocked call whose result is the `⚠️ TOOL CALL LOOP` message (`{windowSize}`-call sequence) — no separate warning turn |
 
@@ -46,14 +45,14 @@ extension file — check, in order:
 If none is readable, use the defaults: `THINKING_WINDOW=80`,
 `OUTPUT_WINDOW=100`, `MAX_WINDOW=4000`, `STRIDE=50`, `PARA_MIN_LEN=40`,
 `FINGERPRINT_LEN=60`, `SEMANTIC_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
-`STAGNATION_THRESHOLD=0.85`, `FILE_READ_LIMIT=4`, `FILE_SCAN_LIMIT=15`, `SEARCH_EXPAND_LIMIT=3`,
+`STAGNATION_THRESHOLD=0.85`, `FILE_SCAN_LIMIT=20`, `SEARCH_EXPAND_LIMIT=3`,
 `CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`. (Configs written before 1.8.0
 may still show the old names `MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`,
 `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`,
 `PARA_LOOP_THRESHOLD` — they map 1:1 onto the new ones and are migrated
 automatically on next load.) A value of `0` on
 `THINKING_WINDOW`, `OUTPUT_WINDOW`, `SEMANTIC_THRESHOLD`, `STAGNATION_WINDOW`,
-`FILE_READ_LIMIT`, `FILE_SCAN_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT` or
+`FILE_SCAN_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT` or
 `TOOL_LOOP_BAN` means that detector is disabled — a disabled detector cannot
 have fired, so skip it (`SEMANTIC_THRESHOLD=0` disables the semantic detector
 on both streams). Keep in mind the session may
@@ -93,16 +92,12 @@ Give each incident exactly one verdict:
 
 Evidence patterns for **false positives**, per detector:
 
-- **File read loop**: the file was *edited between reads* (edit → re-read
-  cycles are legitimate). The counter is keyed by path + line range
-  (offset/limit), so chunked reads of a large file with different offsets do
-  NOT trip this detector — if they did, the range fields were named something
-  the extension doesn't recognize. Also remember the counter only resets on
-  `agent_start` / `/loop-police reset` — in a long session, 4 reads of a hot
-  file spread over hours is normal, not a loop.
 - **File read ceiling**: a genuinely huge file legitimately paged end to end
   in more than `FILE_SCAN_LIMIT` chunks, or a hot file re-read (with edits in
-  between) many times over a very long session.
+  between) many times over a very long session. Only reads that actually ran
+  count — calls blocked by any detector never inflate it — and the counter
+  only resets on `agent_start` / `/loop-police reset`. Identical back-to-back
+  re-reads are the tool call loop's case, not this detector's.
 - **Search spiral**: the same pattern across several paths was *systematic
   exploration* where each result was acted on (different findings each time),
   e.g. checking every package in a monorepo for the same symbol.
@@ -130,8 +125,7 @@ Map each non-justified verdict to a config change:
 
 | Verdict on | Change |
 |------------|--------|
-| File read FP | raise `FILE_READ_LIMIT` (4 → 6–8); for edit-heavy sessions also mention `/loop-police reset` as the zero-config fix |
-| File read ceiling FP | raise `FILE_SCAN_LIMIT` (15 → 25–30); for very large files also suggest targeted greps instead of paging |
+| File read ceiling FP | raise `FILE_SCAN_LIMIT` (20 → 30–40); for very large files also suggest targeted greps instead of paging; for edit-heavy sessions also mention `/loop-police reset` as the zero-config fix |
 | Search spiral FP | raise `SEARCH_EXPAND_LIMIT` (3 → 5) — monorepos and multi-package repos usually need this |
 | Tool loop FP (polling) | no threshold key exists; recommend the agent interleave a different call between polls, or `/loop-police reset`; do NOT recommend raising `TOOL_LOOP_BAN` here (and only suggest `TOOL_LOOP_BAN=0` — detector off — if the user explicitly wants it gone) |
 | Tool loop ineffective (model keeps re-issuing the blocked call) | `TOOL_LOOP_BAN=2` |

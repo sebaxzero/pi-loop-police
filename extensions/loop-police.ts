@@ -14,7 +14,6 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 //   OUTPUT_WINDOW=0          → character-level output loop off
 //   SEMANTIC_THRESHOLD=0     → semantic (paragraph) loop off, both streams
 //   STAGNATION_WINDOW=0      → cross-turn stagnation off
-//   FILE_READ_LIMIT=0        → file read loop off
 //   FILE_SCAN_LIMIT=0        → per-file total read ceiling off
 //   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
 //   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
@@ -29,8 +28,8 @@ const NUMERIC_DEFAULTS = {
   SEMANTIC_THRESHOLD: 3,
   STAGNATION_WINDOW: 4,
   STAGNATION_THRESHOLD: 0.85,
-  FILE_READ_LIMIT: 4, //  reads of the same path + line range (offset/limit)
-  FILE_SCAN_LIMIT: 15, // total reads of the same path across ALL line ranges
+  FILE_SCAN_LIMIT: 20, // total reads of the same path across ALL line ranges;
+  //                      only reads that actually ran count (blocked calls don't)
   SEARCH_EXPAND_LIMIT: 3,
   CONSECUTIVE_LOOP_LIMIT: 2,
   TOOL_LOOP_BAN: 1, // 0 = detector off;
@@ -63,7 +62,6 @@ const STRING_DEFAULTS = {
 // better to different phrasing. Placeholders in {braces} are filled at runtime:
 //   MSG_CONSECUTIVE_LOOP → {count}
 //   MSG_STAGNATION       → {window} {threshold}
-//   MSG_FILE_READ_LOOP   → {path} {count}
 //   MSG_FILE_SCAN_LOOP   → {path} {count}
 //   MSG_SEARCH_SPIRAL    → {pattern} {paths}
 //   MSG_TOOL_LOOP        → {windowSize}
@@ -83,8 +81,6 @@ const MESSAGE_DEFAULTS = {
     "⚠️ CONSECUTIVE LOOP ({count}x): You have entered a loop {count} times in a row and loop-police has aborted your output each time. Stop — provide a direct, concise answer or ask for clarification.",
   MSG_STAGNATION:
     "⚠️ REASONING STAGNATION: Your thinking across the last {window} turns has been {threshold}%+ similar — you are not making progress. Stop and try a fundamentally different approach.",
-  MSG_FILE_READ_LOOP:
-    '⚠️ FILE READ LOOP: "{path}" has been read {count} times with the same line range. Reading it again will not yield new information — use what you already know and move forward.',
   MSG_FILE_SCAN_LOOP:
     '⚠️ FILE READ CEILING: "{path}" has been read {count} times in total, counting every line range. Paging through it further is not converging — use a targeted search (grep) or what you already read, and move forward.',
   MSG_SEARCH_SPIRAL:
@@ -98,8 +94,10 @@ const DEFAULTS = { ...NUMERIC_DEFAULTS, ...STRING_DEFAULTS, ...MESSAGE_DEFAULTS 
 
 // Stamped into loop-police.json. Files written before 1.5.0 lack it, which is
 // how migrateToolLoopBan() recognizes the old TOOL_LOOP_BAN scale; files
-// stamped below 3 still use the pre-1.8.0 key names (see RENAMED_KEYS).
-const CONFIG_VERSION = 3;
+// stamped below 3 still use the pre-1.8.0 key names (see RENAMED_KEYS); files
+// stamped below 4 still carry the removed same-range file read detector keys
+// (see migrateRemovedKeys).
+const CONFIG_VERSION = 4;
 
 // 1.8.0 (CONFIG_VERSION 3) renamed the stream-detector keys to conventional
 // terms. migrateRenamedKeys() carries customized values over to the new names;
@@ -137,6 +135,14 @@ const cfg: typeof DEFAULTS & Record<string, number | string> = (() => {
   Object.assign(merged, migrateRenamedKeys(fromFile));
   for (const oldKey of Object.keys(RENAMED_KEYS)) delete (merged as any)[oldKey];
 
+  // CONFIG_VERSION 4 removed the same-range file read detector (the tool call
+  // sequence detector blocks identical re-reads in place, cheaper). Drop its
+  // keys; keys that still exist in DEFAULTS are reset so the new default applies.
+  for (const k of migrateRemovedKeys(fromFile)) {
+    if (k in DEFAULTS) (merged as any)[k] = (DEFAULTS as any)[k];
+    else delete (merged as any)[k];
+  }
+
   const stampNeeded = fromFile !== null && fromFile.CONFIG_VERSION !== CONFIG_VERSION;
   merged.CONFIG_VERSION = CONFIG_VERSION;
 
@@ -168,8 +174,7 @@ export default function (pi: ExtensionAPI) {
   let toolHistory: string[] = [];
   let bannedCalls = new Set<string>();
   let thinkingHistory: string[] = [];
-  let fileReadRanges = new Map<string, number>(); // "path range" → reads of that exact range
-  let fileReadTotals = new Map<string, number>(); // path → total reads across all ranges
+  let fileReadTotals = new Map<string, number>(); // path → reads that actually ran, all ranges
   let searchPatternPaths = new Map<string, Set<string>>();
   let consecutiveLoopCount = 0;
   let turnIndex = 0;
@@ -194,7 +199,6 @@ export default function (pi: ExtensionAPI) {
     toolHistory = [];
     bannedCalls = new Set();
     thinkingHistory = [];
-    fileReadRanges = new Map();
     fileReadTotals = new Map();
     searchPatternPaths = new Map();
     consecutiveLoopCount = 0;
@@ -431,33 +435,53 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("tool_call", (event, ctx) => {
-    // File read repetition. FILE_READ_LIMIT counts reads of the same path AND
-    // the same line range (offset/limit), so paging through a large file in
-    // chunks is not a loop — each chunk yields new information. FILE_SCAN_LIMIT
-    // is a generous per-path ceiling across all ranges, catching the model that
-    // keeps re-scanning one file with ever-different offsets.
-    if ((cfg.FILE_READ_LIMIT > 0 || cfg.FILE_SCAN_LIMIT > 0) && isReadTool(event.toolName)) {
+    // Tool call sequence loop — checked before the read/search counters below,
+    // so a call it blocks never counts as a read or a search: a blocked call
+    // never ran. The repeated call is blocked *in place* and the warning handed
+    // back as the tool result, so the model must pivot within the same turn.
+    // No new turn, and other (different) tools are left available.
+    const hash = hashToolCall(event.toolName, event.input);
+    // Exempt tools (TOOL_LOOP_EXEMPT) are never checked or blocked, but their
+    // calls still enter the history (at the bottom of this handler) so they
+    // break adjacency for other tools exactly as any different call does.
+    if (cfg.TOOL_LOOP_BAN > 0 && !isExemptTool(event.toolName, cfg.TOOL_LOOP_EXEMPT)) {
+      // Permanent-ban mode (TOOL_LOOP_BAN=2): once a call has looped, that
+      // exact call stays blocked for the rest of the session, no matter what.
+      if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
+        ctx.ui.notify(`⚠️ TOOL LOOP: identical call blocked (banned)`, "warning");
+        emitDetection(ctx, "tool_loop", { toolName: event.toolName, windowSize: 1, banned: true });
+        return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 })) };
+      }
+      const windowSize = detectSequenceRepeat([...toolHistory, hash]);
+      if (windowSize > 0) {
+        if (cfg.TOOL_LOOP_BAN >= 2) bannedCalls.add(hash);
+        ctx.ui.notify(`⚠️ TOOL LOOP: ${windowSize}-call sequence repeating — blocked`, "warning");
+        emitDetection(ctx, "tool_loop", {
+          toolName: event.toolName,
+          windowSize,
+          banned: cfg.TOOL_LOOP_BAN >= 2,
+        });
+        // Do NOT record the blocked call: toolHistory stays at the looping state
+        // so a renewed identical attempt trips the detector again in place. The
+        // moment the model does something different, adjacency breaks and the
+        // call is allowed again (safe for build/test/lint re-runs).
+        return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize })) };
+      }
+    }
+
+    // File read ceiling. Identical re-reads (adjacent, or inside a repeating
+    // call pattern) are the sequence detector's case above; this is the
+    // per-path complement, catching the model that keeps coming back to one
+    // file with ever-different offsets instead of searching it. Only reads
+    // that actually ran are counted — calls blocked above never reached the
+    // file — so the legitimate reference pattern (read → edit something else
+    // → re-read) spends the budget one real read at a time, and {count} is
+    // always the number of reads that truly happened.
+    if (cfg.FILE_SCAN_LIMIT > 0 && isReadTool(event.toolName)) {
       const path = getInputPath(event.input);
       if (path) {
-        const rangeKey = `${path} ${getReadRange(event.input)}`;
-        const count = (fileReadRanges.get(rangeKey) ?? 0) + 1;
-        fileReadRanges.set(rangeKey, count);
-        const total = (fileReadTotals.get(path) ?? 0) + 1;
-        fileReadTotals.set(path, total);
-        if (cfg.FILE_READ_LIMIT > 0 && count >= cfg.FILE_READ_LIMIT) {
-          ctx.ui.notify(`⚠️ FILE READ LOOP: "${path}" read ${count}x (same range) — blocked`, "warning");
-          emitDetection(ctx, "file_read_loop", { toolName: event.toolName, path, count });
-          pi.sendMessage(
-            {
-              customType: "loop-police",
-              content: withSuffix(fmt(cfg.MSG_FILE_READ_LOOP, { path, count })),
-              display: true,
-            },
-            { triggerTurn: true }
-          );
-          return { block: true, reason: `loop-police: file read ${count}x — ${path}` };
-        }
-        if (cfg.FILE_SCAN_LIMIT > 0 && total >= cfg.FILE_SCAN_LIMIT) {
+        const total = fileReadTotals.get(path) ?? 0;
+        if (total >= cfg.FILE_SCAN_LIMIT) {
           ctx.ui.notify(`⚠️ FILE READ CEILING: "${path}" read ${total}x total — blocked`, "warning");
           emitDetection(ctx, "file_scan_loop", { toolName: event.toolName, path, count: total });
           pi.sendMessage(
@@ -470,6 +494,7 @@ export default function (pi: ExtensionAPI) {
           );
           return { block: true, reason: `loop-police: file read ${total}x total — ${path}` };
         }
+        fileReadTotals.set(path, total + 1);
       }
     }
 
@@ -501,44 +526,9 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // Tool call sequence loop — block the repeated call *in place* and hand the
-    // warning back as the tool result, so the model must pivot within the same
-    // turn. No new turn, and other (different) tools are left available.
-    if (cfg.TOOL_LOOP_BAN <= 0) return;
-    const hash = hashToolCall(event.toolName, event.input);
-
-    // Exempt tools (TOOL_LOOP_EXEMPT) are never checked or blocked, but their
-    // calls still enter the history so they break adjacency for other tools.
-    if (isExemptTool(event.toolName, cfg.TOOL_LOOP_EXEMPT)) {
-      toolHistory.push(hash);
-      return;
-    }
-
-    // Permanent-ban mode (TOOL_LOOP_BAN=2): once a call has looped, that exact
-    // call stays blocked for the rest of the session, no matter what.
-    if (cfg.TOOL_LOOP_BAN >= 2 && bannedCalls.has(hash)) {
-      ctx.ui.notify(`⚠️ TOOL LOOP: identical call blocked (banned)`, "warning");
-      emitDetection(ctx, "tool_loop", { toolName: event.toolName, windowSize: 1, banned: true });
-      return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize: 1 })) };
-    }
-
-    const windowSize = detectSequenceRepeat([...toolHistory, hash]);
-    if (windowSize > 0) {
-      if (cfg.TOOL_LOOP_BAN >= 2) bannedCalls.add(hash);
-      ctx.ui.notify(`⚠️ TOOL LOOP: ${windowSize}-call sequence repeating — blocked`, "warning");
-      emitDetection(ctx, "tool_loop", {
-        toolName: event.toolName,
-        windowSize,
-        banned: cfg.TOOL_LOOP_BAN >= 2,
-      });
-      // Do NOT record the blocked call: toolHistory stays at the looping state
-      // so a renewed identical attempt trips the detector again in place. The
-      // moment the model does something different, adjacency breaks and the
-      // call is allowed again (safe for build/test/lint re-runs).
-      return { block: true, reason: withSuffix(fmt(cfg.MSG_TOOL_LOOP, { windowSize })) };
-    }
-
-    toolHistory.push(hash);
+    // Record the allowed call in the sequence history (exempt tools included,
+    // so they keep breaking adjacency). Blocked calls never reach this line.
+    if (cfg.TOOL_LOOP_BAN > 0) toolHistory.push(hash);
   });
 
   pi.registerCommand("loop-police", {
@@ -579,7 +569,7 @@ export default function (pi: ExtensionAPI) {
           `  tool history:        ${toolHistory.length} calls`,
           `  banned calls:        ${bannedCalls.size}`,
           `  stagnation history:  ${thinkingHistory.length}/${cfg.STAGNATION_WINDOW} turns`,
-          `  file reads tracked:  ${fileReadTotals.size} paths (${fileReadRanges.size} ranges)`,
+          `  file reads tracked:  ${fileReadTotals.size} paths`,
           `  search patterns:     ${searchPatternPaths.size} patterns`,
           `  consecutive loops:   ${consecutiveLoopCount}/${cfg.CONSECUTIVE_LOOP_LIMIT}`,
           "",
@@ -668,6 +658,19 @@ function migrateRenamedKeys(fromFile: Record<string, unknown> | null): Record<st
   return out;
 }
 
+// Returns the config keys to drop when upgrading to CONFIG_VERSION 4, which
+// removed the same-range file read detector (FILE_READ_LIMIT /
+// MSG_FILE_READ_LOOP — identical re-reads are the sequence detector's case).
+// A FILE_SCAN_LIMIT still at the old default (15) is dropped too, so the new
+// default applies; a customized value survives.
+function migrateRemovedKeys(fromFile: Record<string, unknown> | null): string[] {
+  if (!fromFile || (typeof fromFile.CONFIG_VERSION === "number" && fromFile.CONFIG_VERSION >= 4))
+    return [];
+  const out = ["FILE_READ_LIMIT", "MSG_FILE_READ_LOOP"];
+  if (fromFile.FILE_SCAN_LIMIT === 15) out.push("FILE_SCAN_LIMIT");
+  return out;
+}
+
 function jaccard(a: string, b: string): number {
   const setA = new Set(a.toLowerCase().split(/\s+/).filter(Boolean));
   const setB = new Set(b.toLowerCase().split(/\s+/).filter(Boolean));
@@ -698,28 +701,6 @@ function getInputPath(input: unknown): string | null {
   if (typeof input !== "object" || !input) return null;
   const inp = input as any;
   return inp.path ?? inp.file_path ?? inp.filename ?? inp.file ?? inp.directory ?? inp.dir ?? null;
-}
-
-// Input keys that identify the file being read (see getInputPath) — excluded
-// from the no-range-fields fallback in getReadRange.
-const PATH_KEYS = new Set(["path", "file_path", "filename", "file", "directory", "dir"]);
-
-// Normalizes the line range of a read call to a "start:end" string. Field
-// names cover the common read-tool schemas (offset/limit, start_line/end_line,
-// startLine/endLine). When the tool has no range fields, the remaining
-// non-path input fields become the key instead — read-style tools addressed by
-// something other than lines (e.g. a symbol name) read *different* content
-// with different params, so those reads must not collide. A path-only input
-// still keys to "": every read of the path IS the same read.
-function getReadRange(input: unknown): string {
-  if (typeof input !== "object" || !input) return "";
-  const inp = input as any;
-  const start = inp.offset ?? inp.start_line ?? inp.startLine ?? null;
-  const end = inp.limit ?? inp.end_line ?? inp.endLine ?? null;
-  if (start !== null || end !== null) return `${start ?? ""}:${end ?? ""}`;
-  const rest: Record<string, unknown> = {};
-  for (const k of Object.keys(inp)) if (!PATH_KEYS.has(k)) rest[k] = inp[k];
-  return Object.keys(rest).length === 0 ? "" : stableStringify(rest);
 }
 
 function getSearchPattern(input: unknown): string | null {
