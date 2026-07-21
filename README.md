@@ -26,7 +26,7 @@ No dependencies, no build step, nothing to configure — it starts protecting th
 
 ## What it detects
 
-Nine detectors, all enabled out of the box:
+Ten detectors, all enabled out of the box:
 
 | Detector | Fires when | What happens |
 |----------|-----------|--------------|
@@ -36,6 +36,7 @@ Nine detectors, all enabled out of the box:
 | **Output semantic loop** | the same paragraph appears 3 times in the visible answer | same |
 | **Stagnation** | thinking across the last 4 turns is ≥ 85% similar | recovery message |
 | **File read ceiling** | the same file path is read 20 times total (only reads that actually ran count) | tool call blocked |
+| **Redundant re-read** | ≥ 40% of the last 10 reads are re-reads of files unchanged since they were first read | tool call blocked in place |
 | **Search spiral** | the same pattern is searched in 3 different locations | tool call blocked |
 | **Tool call loop** | an identical sequence of tool calls repeats back-to-back | tool call blocked in place |
 | **Re-derived reasoning** | right after any detection, the model's thinking re-derives the same reasoning that led to it (≥ 85% similar) | reasoning trimmed from context, recovery message |
@@ -59,7 +60,15 @@ Some models never loop within a turn but still spin their wheels: each turn's th
 
 Identical re-reads are the tool call sequence detector's job (below): reading the same file with the same arguments again is just a repeated tool call, blocked in place on the second back-to-back attempt. What remains for a dedicated file detector is the per-path complement: if a tool call looks like a file read (`read`, `view`, `cat`, …), `FILE_SCAN_LIMIT` (20) blocks once the same path has been read that many times **in total across all line ranges** — the model that keeps coming back to one file with ever-different offsets instead of searching it.
 
-Only reads that **actually ran** count toward the ceiling. A call blocked by any detector never reached the file, so it does not spend the budget and never inflates the reported count. That keeps the legitimate reference pattern safe by construction: read a hot file, edit something else, re-read it, edit again — the interleaved different work means the sequence detector never fires, and each pass costs exactly one real read out of 20. Raise the limit for workflows where heavy re-reading is legitimate, or run `/loop-police reset` to clear the counters mid-session.
+Only reads that **actually ran** count toward the ceiling. A call blocked by any detector never reached the file, so it does not spend the budget and never inflates the reported count. Raise the limit for workflows where heavy re-reading is legitimate, or run `/loop-police reset` to clear the counters mid-session. Note the redundant re-read window (next) judges re-reading more strictly: there, a re-read only counts as fresh when the file itself was edited in between.
+
+### Redundant re-read window
+
+The failure mode neither of the per-target counters can see: a model sweeping a repo (an audit, a review) loses track of which files it already read and starts re-reading them — interleaved with fresh reads, so no per-path total climbs toward the ceiling and no identical call sequence ever forms. The symptom in the thinking is generic ("Let me continue reading…") while progress has stopped.
+
+`REREAD_WINDOW` (10) keeps a sliding window of the last real reads, marking each one **redundant** when its path was already read this session *and has not been written or edited since* — read → edit → re-read counts as fresh, because the edit invalidated what was in context. When the window is full and at least `REREAD_RATIO` (0.4 = 40%) of it is redundant, the read is blocked **in place**: the recovery message is handed back as the tool's result in the same turn, telling the model it already has that file, how many of its recent reads were repeats, and to work from context (or write down its progress) instead of re-reading. The window is cleared on a firing so blocks never chain back-to-back, and blocked reads never enter the window (they didn't run).
+
+This deliberately treats *any* re-read of an unchanged file as redundant — including paging back into a big file or repeatedly consulting a reference file without editing it. If your workflow legitimately does that, raise `REREAD_RATIO`, or disable the detector with `REREAD_WINDOW=0`.
 
 ### Search expansion spiral
 
@@ -113,6 +122,8 @@ STAGNATION_WINDOW: 4        // turns of similar thinking → stagnation
 STAGNATION_THRESHOLD: 0.85  // similarity threshold for stagnation (Jaccard)
 FILE_SCAN_LIMIT: 20         // real (non-blocked) reads of the same path before blocking
 SEARCH_EXPAND_LIMIT: 3      // distinct paths for the same search pattern before blocking
+REREAD_WINDOW: 10           // sliding window of real reads checked for redundancy
+REREAD_RATIO: 0.4           // share of the window that is re-reads of unchanged files before blocking
 CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalates
 TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
 TOOL_LOOP_EXEMPT: ""        // tool names exempt from the tool call loop detector
@@ -127,6 +138,7 @@ Tuning rules of thumb:
 - False positives on thinking/output loops → raise `THINKING_WINDOW`/`OUTPUT_WINDOW` (char-level) or `SEMANTIC_THRESHOLD`/`FINGERPRINT_LEN` (semantic).
 - Structured answers with legitimately similar paragraph openings (checklists, per-file reports) → raise `FINGERPRINT_LEN` so fingerprints capture more of each paragraph.
 - Projects where re-reading files is normal → raise `FILE_SCAN_LIMIT` (total per file); monorepos → raise `SEARCH_EXPAND_LIMIT`.
+- Workflows that legitimately re-read unchanged files (huge files paged repeatedly, reference docs consulted often) → raise `REREAD_RATIO` (0.4 → 0.5–0.6) or set `REREAD_WINDOW=0`.
 - Loops caught too late → lower `SEMANTIC_THRESHOLD` to 2 (more sensitive, more false-positive prone).
 
 ### Disabling individual detectors
@@ -141,6 +153,7 @@ Setting a detector's key to `0` turns it off entirely:
 | `STAGNATION_WINDOW=0` | cross-turn stagnation |
 | `FILE_SCAN_LIMIT=0` | file read ceiling |
 | `SEARCH_EXPAND_LIMIT=0` | search expansion spiral |
+| `REREAD_WINDOW=0` | redundant re-read window |
 | `CONSECUTIVE_LOOP_LIMIT=0` | escalated consecutive-loop message |
 | `TOOL_LOOP_BAN=0` | tool call sequence loop |
 | `REDERIVE_THRESHOLD=0` | re-derived reasoning guard |
@@ -159,6 +172,7 @@ The text injected when a loop is detected is configurable — some models respon
 | `MSG_STAGNATION` | cross-turn reasoning stagnation | `{window}` `{threshold}` |
 | `MSG_FILE_SCAN_LOOP` | same file read too many times in total (all ranges) | `{path}` `{count}` |
 | `MSG_SEARCH_SPIRAL` | search pattern spread across too many paths | `{pattern}` `{paths}` |
+| `MSG_REREAD` | re-read of an unchanged, already-read file blocked | `{path}` `{count}` `{window}` |
 | `MSG_TOOL_LOOP` | identical tool-call sequence repeating | `{windowSize}` |
 | `MSG_REDERIVED` | post-detection reasoning re-derived and trimmed | — |
 | `MSG_STUCK` | the same blocked plan re-derived `{count}` times in a row | `{count}` |
@@ -194,7 +208,7 @@ The payload:
 }
 ```
 
-`event` is one of `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_scan_loop`, `search_spiral`, `tool_loop`, `rederived_reasoning`. `model` is `null` when no model is selected. `details` is event-specific: the stream loops carry `{ stream, kind, escalated }` (`escalated: true` when the consecutive-loop message fired), `stagnation` carries `{ window, threshold }`, `file_scan_loop` `{ toolName, path, count }`, `search_spiral` `{ toolName, pattern, paths }`, `tool_loop` `{ toolName, windowSize, banned }`, and `rederived_reasoning` `{ streak }`. The payload carries metadata only — never the thinking text or tool arguments; a hook that wants the transcript can read it from `sessionFile`.
+`event` is one of `thinking_loop`, `semantic_loop`, `output_loop`, `output_semantic_loop`, `stagnation`, `file_scan_loop`, `redundant_reread`, `search_spiral`, `tool_loop`, `rederived_reasoning`. `model` is `null` when no model is selected. `details` is event-specific: the stream loops carry `{ stream, kind, escalated }` (`escalated: true` when the consecutive-loop message fired), `stagnation` carries `{ window, threshold }`, `file_scan_loop` `{ toolName, path, count }`, `redundant_reread` `{ toolName, path, count, window }`, `search_spiral` `{ toolName, pattern, paths }`, `tool_loop` `{ toolName, windowSize, banned }`, and `rederived_reasoning` `{ streak }`. The payload carries metadata only — never the thinking text or tool arguments; a hook that wants the transcript can read it from `sessionFile`.
 
 ### `HOOK_CMD` — run an external command
 

@@ -27,6 +27,7 @@ leaves a distinct trace:
 | Consecutive loop (escalation) | `⚠️ CONSECUTIVE LOOP ({count}x)` warning |
 | Stagnation | `⚠️ REASONING STAGNATION` warning |
 | File read ceiling | blocked call with `loop-police: file read {count}x total — {path}` + `⚠️ FILE READ CEILING` warning (sessions from < 1.12.0 may also show the removed same-range detector: `loop-police: file read {count}x — {path}` + `⚠️ FILE READ LOOP`) |
+| Redundant re-read | blocked call whose result is the `⚠️ REDUNDANT RE-READ` message (`{count}` of the last `{window}` reads were repeats) — in place, no separate warning turn |
 | Search spiral | blocked call with `loop-police: search spiral "{pattern}"` + `⚠️ SEARCH EXPANSION SPIRAL` warning |
 | Tool call loop | blocked call whose result is the `⚠️ TOOL CALL LOOP` message (`{windowSize}`-call sequence) — no separate warning turn |
 | Re-derived reasoning | assistant thinking replaced entirely by `[REDERIVED REASONING — trimmed by loop-police: …]` + a `⚠️ REDERIVED REASONING` warning, or `⚠️ STUCK ({count}x)` when it repeated |
@@ -46,14 +47,15 @@ extension file — check, in order:
 If none is readable, use the defaults: `THINKING_WINDOW=80`,
 `OUTPUT_WINDOW=100`, `MAX_WINDOW=4000`, `STRIDE=50`, `PARA_MIN_LEN=40`,
 `FINGERPRINT_LEN=60`, `SEMANTIC_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
-`STAGNATION_THRESHOLD=0.85`, `FILE_SCAN_LIMIT=20`, `SEARCH_EXPAND_LIMIT=3`,
+`STAGNATION_THRESHOLD=0.85`, `FILE_SCAN_LIMIT=20`, `REREAD_WINDOW=10`,
+`REREAD_RATIO=0.4`, `SEARCH_EXPAND_LIMIT=3`,
 `CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`, `REDERIVE_THRESHOLD=0.85`. (Configs written before 1.8.0
 may still show the old names `MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`,
 `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`,
 `PARA_LOOP_THRESHOLD` — they map 1:1 onto the new ones and are migrated
 automatically on next load.) A value of `0` on
 `THINKING_WINDOW`, `OUTPUT_WINDOW`, `SEMANTIC_THRESHOLD`, `STAGNATION_WINDOW`,
-`FILE_SCAN_LIMIT`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT`,
+`FILE_SCAN_LIMIT`, `REREAD_WINDOW`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT`,
 `TOOL_LOOP_BAN` or `REDERIVE_THRESHOLD` means that detector is disabled — a disabled detector cannot
 have fired, so skip it (`SEMANTIC_THRESHOLD=0` disables the semantic detector
 on both streams). Keep in mind the session may
@@ -99,6 +101,13 @@ Evidence patterns for **false positives**, per detector:
   count — calls blocked by any detector never inflate it — and the counter
   only resets on `agent_start` / `/loop-police reset`. Identical back-to-back
   re-reads are the tool call loop's case, not this detector's.
+- **Redundant re-read**: legitimate re-reads of files that genuinely never
+  changed — paging back into a file too large to hold in context, or
+  repeatedly consulting a reference file without ever editing it. Any re-read
+  of an unchanged path counts as redundant (only an edit/write to that path
+  makes the next read fresh), so check whether each re-read led to new action
+  (legitimate) or the model was visibly losing track of what it had covered
+  (justified firing).
 - **Search spiral**: the same pattern across several paths was *systematic
   exploration* where each result was acted on (different findings each time),
   e.g. checking every package in a monorepo for the same symbol.
@@ -131,6 +140,7 @@ Map each non-justified verdict to a config change:
 | Verdict on | Change |
 |------------|--------|
 | File read ceiling FP | raise `FILE_SCAN_LIMIT` (20 → 30–40); for very large files also suggest targeted greps instead of paging; for edit-heavy sessions also mention `/loop-police reset` as the zero-config fix |
+| Redundant re-read FP | raise `REREAD_RATIO` (0.4 → 0.5–0.6); for huge files also suggest targeted greps instead of paging back in; `REREAD_WINDOW=0` only if the user explicitly wants it off |
 | Search spiral FP | raise `SEARCH_EXPAND_LIMIT` (3 → 5) — monorepos and multi-package repos usually need this |
 | Tool loop FP (polling) | no threshold key exists; recommend the agent interleave a different call between polls, or `/loop-police reset`; do NOT recommend raising `TOOL_LOOP_BAN` here (and only suggest `TOOL_LOOP_BAN=0` — detector off — if the user explicitly wants it gone) |
 | Tool loop ineffective (model keeps re-issuing the blocked call) | `TOOL_LOOP_BAN=2` |

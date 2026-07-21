@@ -16,6 +16,7 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 //   STAGNATION_WINDOW=0      → cross-turn stagnation off
 //   FILE_SCAN_LIMIT=0        → per-file total read ceiling off
 //   SEARCH_EXPAND_LIMIT=0    → search expansion spiral off
+//   REREAD_WINDOW=0          → redundant re-read window off
 //   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
 //   TOOL_LOOP_BAN=0          → tool call sequence loop off
 //   REDERIVE_THRESHOLD=0     → re-derived reasoning guard off
@@ -32,6 +33,9 @@ const NUMERIC_DEFAULTS = {
   FILE_SCAN_LIMIT: 20, // total reads of the same path across ALL line ranges;
   //                      only reads that actually ran count (blocked calls don't)
   SEARCH_EXPAND_LIMIT: 3,
+  REREAD_WINDOW: 10, // sliding window of real reads checked for redundancy; 0 = off
+  REREAD_RATIO: 0.4, // share of the (full) window that is re-reads of unchanged,
+  //                    already-read paths before the read is blocked in place
   CONSECUTIVE_LOOP_LIMIT: 2,
   TOOL_LOOP_BAN: 1, // 0 = detector off;
   //                   1 = block identical call only while repeated back-to-back;
@@ -69,6 +73,7 @@ const STRING_DEFAULTS = {
 //   MSG_STAGNATION       → {window} {threshold}
 //   MSG_FILE_SCAN_LOOP   → {path} {count}
 //   MSG_SEARCH_SPIRAL    → {pattern} {paths}
+//   MSG_REREAD           → {path} {count} {window}
 //   MSG_TOOL_LOOP        → {windowSize}
 //   MSG_STUCK            → {count}
 // MSG_SUFFIX, when non-empty, is appended (after a blank line) to EVERY
@@ -91,6 +96,8 @@ const MESSAGE_DEFAULTS = {
     '⚠️ FILE READ CEILING: "{path}" has been read {count} times in total, counting every line range. Paging through it further is not converging — use a targeted search (grep) or what you already read, and move forward.',
   MSG_SEARCH_SPIRAL:
     '⚠️ SEARCH EXPANSION SPIRAL: Pattern "{pattern}" has been searched in {paths} different locations. Broadening the scope further will not help — reconsider what you are looking for.',
+  MSG_REREAD:
+    '⚠️ REDUNDANT RE-READ: "{path}" was already read this session and has not changed since — its content is in your context. {count} of your last {window} reads were re-reads of files you already have; you are re-reading instead of progressing. This call was blocked. Work from what is already in context, and if you are losing track of progress, write down what you have covered so far and continue with what is left.',
   MSG_TOOL_LOOP:
     "⚠️ TOOL CALL LOOP: The same sequence of {windowSize} tool call(s) is repeating identically and has been blocked — this exact call did NOT run and will keep being blocked if you repeat it. It produced no new result last time and won't now. Change your approach: try a different command, or use what you already learned to move forward.",
   MSG_REDERIVED:
@@ -186,6 +193,8 @@ export default function (pi: ExtensionAPI) {
   let thinkingHistory: string[] = [];
   let fileReadTotals = new Map<string, number>(); // path → reads that actually ran, all ranges
   let searchPatternPaths = new Map<string, Set<string>>();
+  let rereadSeen = new Set<string>(); // paths read this session, minus those written/edited since
+  let rereadWindow: boolean[] = []; // last REREAD_WINDOW real reads: true = redundant
   // Re-derived reasoning guard (issue #8). Armed when any detector fires; the
   // next clean assistant message's thinking is then compared against the
   // reasoning that led to the detection (lastThinking) and trimmed from
@@ -218,6 +227,8 @@ export default function (pi: ExtensionAPI) {
     thinkingHistory = [];
     fileReadTotals = new Map();
     searchPatternPaths = new Map();
+    rereadSeen = new Set();
+    rereadWindow = [];
     loopArmed = false;
     rederiveStreak = 0;
     lastThinking = "";
@@ -547,11 +558,11 @@ export default function (pi: ExtensionAPI) {
     // file — so the legitimate reference pattern (read → edit something else
     // → re-read) spends the budget one real read at a time, and {count} is
     // always the number of reads that truly happened.
-    if (cfg.FILE_SCAN_LIMIT > 0 && isReadTool(event.toolName)) {
+    if (isReadTool(event.toolName)) {
       const path = getInputPath(event.input);
       if (path) {
         const total = fileReadTotals.get(path) ?? 0;
-        if (total >= cfg.FILE_SCAN_LIMIT) {
+        if (cfg.FILE_SCAN_LIMIT > 0 && total >= cfg.FILE_SCAN_LIMIT) {
           ctx.ui.notify(`⚠️ FILE READ CEILING: "${path}" read ${total}x total — blocked`, "warning");
           loopArmed = true;
           emitDetection(ctx, "file_scan_loop", { toolName: event.toolName, path, count: total });
@@ -565,8 +576,52 @@ export default function (pi: ExtensionAPI) {
           );
           return { block: true, reason: `loop-police: file read ${total}x total — ${path}` };
         }
-        fileReadTotals.set(path, total + 1);
+
+        // Redundant re-read window: the audit failure mode neither counter
+        // above can see — re-reads of already-read files interleaved with
+        // fresh reads, so no per-path total climbs and no identical call
+        // sequence forms; the model has lost track of what it already read.
+        // A read is redundant when its path was read before this session AND
+        // has not been written/edited since (see the invalidation below).
+        // Blocked in place like the sequence detector — the recovery message
+        // is the tool result, no new turn — and the window resets on a firing
+        // so blocks never chain back-to-back.
+        if (cfg.REREAD_WINDOW > 0) {
+          const res = checkReread(rereadWindow, rereadSeen.has(path), cfg.REREAD_WINDOW, cfg.REREAD_RATIO);
+          if (res.fired) {
+            rereadWindow = [];
+            ctx.ui.notify(
+              `⚠️ REDUNDANT RE-READ: "${path}" — ${res.count}/${cfg.REREAD_WINDOW} recent reads were repeats — blocked`,
+              "warning"
+            );
+            loopArmed = true;
+            emitDetection(ctx, "redundant_reread", {
+              toolName: event.toolName,
+              path,
+              count: res.count,
+              window: cfg.REREAD_WINDOW,
+            });
+            return {
+              block: true,
+              reason: withSuffix(fmt(cfg.MSG_REREAD, { path, count: res.count, window: cfg.REREAD_WINDOW })),
+            };
+          }
+          rereadWindow = res.window;
+        }
+
+        // The read is allowed and will actually run — only now does it enter
+        // either counter, so calls blocked above never count anywhere.
+        if (cfg.FILE_SCAN_LIMIT > 0) fileReadTotals.set(path, total + 1);
+        if (cfg.REREAD_WINDOW > 0) rereadSeen.add(path);
       }
+    }
+
+    // A write or edit on a path invalidates its redundant-read record: the
+    // next read brings genuinely new content, so read → edit → re-read counts
+    // as fresh. Calls blocked by the sequence detector never reach this line.
+    if (cfg.REREAD_WINDOW > 0 && isWriteTool(event.toolName)) {
+      const path = getInputPath(event.input);
+      if (path) rereadSeen.delete(path);
     }
 
     // Search expansion spiral
@@ -643,6 +698,7 @@ export default function (pi: ExtensionAPI) {
           `  stagnation history:  ${thinkingHistory.length}/${cfg.STAGNATION_WINDOW} turns`,
           `  re-derive guard:     ${loopArmed ? "armed" : "idle"} (streak ${rederiveStreak})`,
           `  file reads tracked:  ${fileReadTotals.size} paths`,
+          `  reread window:       ${rereadWindow.filter(Boolean).length}/${rereadWindow.length} redundant (window ${cfg.REREAD_WINDOW})`,
           `  search patterns:     ${searchPatternPaths.size} patterns`,
           `  consecutive loops:   ${consecutiveLoopCount}/${cfg.CONSECUTIVE_LOOP_LIMIT}`,
           "",
@@ -764,6 +820,12 @@ function isExemptTool(name: string, exemptCfg: string | number): boolean {
 
 function isReadTool(name: string): boolean {
   return /\bread|view|cat\b/i.test(name);
+}
+
+// Write-shaped tools (write_file, edit, str_replace_editor, create_file, …)
+// invalidate the redundant re-read record for their path.
+function isWriteTool(name: string): boolean {
+  return /write|edit|create/i.test(name);
 }
 
 function isSearchTool(name: string): boolean {
@@ -916,6 +978,24 @@ function detectSequenceRepeat(history: string[]): number {
     if (prev.length === w && tail.every((v, i) => v === prev[i])) return w;
   }
   return 0;
+}
+
+// Redundant re-read window: slide this read's redundancy flag into the window
+// and decide whether the ratio trips. Fires only on a full window with at
+// least one redundant read (so a zero ratio cannot fire on all-new reads).
+// The returned window includes this read; the caller discards it and resets
+// to empty when the detector fires (a blocked read never ran).
+function checkReread(
+  window: boolean[],
+  redundant: boolean,
+  size: number,
+  ratio: number
+): { window: boolean[]; fired: boolean; count: number } {
+  const next = [...window, redundant];
+  if (next.length > size) next.shift();
+  const count = next.filter(Boolean).length;
+  const fired = next.length >= size && count > 0 && count / next.length >= ratio;
+  return { window: next, fired, count };
 }
 
 // Splits HOOK_CMD on whitespace into executable + fixed args, so interpreters
