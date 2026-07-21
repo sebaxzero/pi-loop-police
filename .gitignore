@@ -15,3 +15,6 @@ suite.shared.js
 
 # Local working notes, never published
 todo.md
+
+# Local publish script, never published with the extension
+publish.ps1
