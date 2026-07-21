@@ -48,7 +48,7 @@ loops in real time before they exhaust your context window.
 | `FILE_SCAN_LIMIT` | `20` | Block reads of the same path at or above this total count of real (non-blocked) reads, all ranges |
 | `SEARCH_EXPAND_LIMIT` | `3` | Block search pattern at or above this many paths |
 | `REREAD_WINDOW` | `10` | Sliding window of real (non-blocked) reads checked for redundancy; a read is redundant when its path was already read and not written/edited since |
-| `REREAD_RATIO` | `0.4` | Share of the full window that must be redundant to block the read in place; the window resets on a firing |
+| `REREAD_RATIO` | `0.4` | Share of the full window that must be redundant to block the read in place; the window resets on a firing. **`0` does not disable** — it fires on *any* redundant read in a full window (most aggressive). Use `REREAD_WINDOW=0` to turn the detector off.
 | `CONSECUTIVE_LOOP_LIMIT` | `2` | Escalated warning after N stream-loop aborts in a row (across turns) |
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
 | `TOOL_LOOP_EXEMPT` | `""` | Comma-separated tool names exempt from the tool call loop detector (case-insensitive exact match, e.g. `bash,run_tests`); exempt calls are never blocked but still break adjacency for other tools |

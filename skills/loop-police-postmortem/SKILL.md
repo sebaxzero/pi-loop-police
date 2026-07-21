@@ -58,7 +58,7 @@ automatically on next load.) A value of `0` on
 `FILE_SCAN_LIMIT`, `REREAD_WINDOW`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT`,
 `TOOL_LOOP_BAN` or `REDERIVE_THRESHOLD` means that detector is disabled — a disabled detector cannot
 have fired, so skip it (`SEMANTIC_THRESHOLD=0` disables the semantic detector
-on both streams). Keep in mind the session may
+on both streams). **Note**: `REREAD_RATIO=0` does NOT disable the redundant re-read detector — it makes it fire on any redundant read (most aggressive). To disable, set `REREAD_WINDOW=0`. Keep in mind the session may
 also carry `/loop-police set` overrides the JSON does not show — if the user
 ran one earlier in this conversation, it wins.
 

@@ -123,7 +123,7 @@ STAGNATION_THRESHOLD: 0.85  // similarity threshold for stagnation (Jaccard)
 FILE_SCAN_LIMIT: 20         // real (non-blocked) reads of the same path before blocking
 SEARCH_EXPAND_LIMIT: 3      // distinct paths for the same search pattern before blocking
 REREAD_WINDOW: 10           // sliding window of real reads checked for redundancy
-REREAD_RATIO: 0.4           // share of the window that is re-reads of unchanged files before blocking
+REREAD_RATIO: 0.4           // share of the window that is re-reads of unchanged files before blocking; **0 = fires on any redundant read (most aggressive), REREAD_WINDOW=0 to disable**
 CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalates
 TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
 TOOL_LOOP_EXEMPT: ""        // tool names exempt from the tool call loop detector
