@@ -20,6 +20,7 @@ const CONFIG_PATH = join(EXT_DIR, "loop-police.json");
 //   CONSECUTIVE_LOOP_LIMIT=0 → escalated consecutive-loop message off
 //   TOOL_LOOP_BAN=0          → tool call sequence loop off
 //   REDERIVE_THRESHOLD=0     → re-derived reasoning guard off
+//   READ_AFTER_WRITE=0      → per-path ceiling reset on write off
 const NUMERIC_DEFAULTS = {
   THINKING_WINDOW: 80,
   OUTPUT_WINDOW: 100,
@@ -45,6 +46,7 @@ const NUMERIC_DEFAULTS = {
   //                           context — small models otherwise re-read their own
   //                           stale plan and retry the blocked action (issue #8)
   HOOK_TIMEOUT_MS: 5000, // HOOK_CMD is killed after this many ms
+  READ_AFTER_WRITE: 0,   // 0 = off; 1 = reset fileReadTotals when a path is written to
 };
 
 // Tool names exempt from the tool call sequence loop detector, comma-separated
@@ -685,12 +687,15 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    // A write or edit on a path invalidates its redundant-read record: the
-    // next read brings genuinely new content, so read → edit → re-read counts
-    // as fresh. Calls blocked by the sequence detector never reach this line.
-    if (cfg.REREAD_WINDOW > 0 && isWriteTool(event.toolName)) {
+    // A write or edit on a path invalidates its redundant-read / ceiling record:
+    // when READ_AFTER_WRITE is on, the next read of a written path starts with a
+    // fresh budget. Calls blocked by the sequence detector never reach this line.
+    if ((cfg.REREAD_WINDOW > 0 || cfg.READ_AFTER_WRITE > 0) && isWriteTool(event.toolName)) {
       const path = getInputPath(event.input);
-      if (path) rereadSeen.delete(path);
+      if (path) {
+        if (cfg.REREAD_WINDOW > 0) rereadSeen.delete(path);
+        if (cfg.READ_AFTER_WRITE > 0) fileReadTotals.delete(path);
+      }
     }
 
     // Search expansion spiral
@@ -761,6 +766,7 @@ export default function (pi: ExtensionAPI) {
           `  re-derive guard:     ${loopArmed ? "armed" : "idle"} (streak ${rederiveStreak})`,
           `  file reads tracked:  ${fileReadTotals.size} paths`,
           `  reread window:       ${rereadWindow.filter(Boolean).length}/${rereadWindow.length} redundant (window ${cfg.REREAD_WINDOW})`,
+          `  read-after-write:    ${cfg.READ_AFTER_WRITE > 0 ? 'on' : 'off'}`,
           `  search patterns:     ${searchPatternPaths.size} patterns`,
           `  consecutive loops:   ${consecutiveLoopCount}/${cfg.CONSECUTIVE_LOOP_LIMIT}`,
           "",

@@ -49,14 +49,15 @@ If none is readable, use the defaults: `THINKING_WINDOW=80`,
 `FINGERPRINT_LEN=60`, `SEMANTIC_THRESHOLD=3`, `STAGNATION_WINDOW=4`,
 `STAGNATION_THRESHOLD=0.85`, `FILE_SCAN_LIMIT=20`, `REREAD_WINDOW=10`,
 `REREAD_RATIO=0.4`, `SEARCH_EXPAND_LIMIT=3`,
-`CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`, `REDERIVE_THRESHOLD=0.85`. (Configs written before 1.8.0
+`CONSECUTIVE_LOOP_LIMIT=2`, `TOOL_LOOP_BAN=1`, `REDERIVE_THRESHOLD=0.85`,
+`READ_AFTER_WRITE=0`. (Configs written before 1.8.0
 may still show the old names `MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`,
 `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`,
 `PARA_LOOP_THRESHOLD` — they map 1:1 onto the new ones and are migrated
 automatically on next load.) A value of `0` on
 `THINKING_WINDOW`, `OUTPUT_WINDOW`, `SEMANTIC_THRESHOLD`, `STAGNATION_WINDOW`,
 `FILE_SCAN_LIMIT`, `REREAD_WINDOW`, `SEARCH_EXPAND_LIMIT`, `CONSECUTIVE_LOOP_LIMIT`,
-`TOOL_LOOP_BAN` or `REDERIVE_THRESHOLD` means that detector is disabled — a disabled detector cannot
+`TOOL_LOOP_BAN`, `REDERIVE_THRESHOLD` or `READ_AFTER_WRITE` means that detector is disabled — a disabled detector cannot
 have fired, so skip it (`SEMANTIC_THRESHOLD=0` disables the semantic detector
 on both streams). **Note**: `REREAD_RATIO=0` does NOT disable the redundant re-read detector — it makes it fire on any redundant read (most aggressive). To disable, set `REREAD_WINDOW=0`. Keep in mind the session may
 also carry `/loop-police set` overrides the JSON does not show — if the user

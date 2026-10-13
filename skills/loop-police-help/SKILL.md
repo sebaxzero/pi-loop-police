@@ -53,11 +53,12 @@ loops in real time before they exhaust your context window.
 | `TOOL_LOOP_BAN` | `1` | `0` = off; `1` = block identical call only while repeated back-to-back; `2` = ban that exact call for the rest of the session |
 | `TOOL_LOOP_EXEMPT` | `""` | Comma-separated tool names exempt from the tool call loop detector (case-insensitive exact match, e.g. `bash,run_tests`); exempt calls are never blocked but still break adjacency for other tools |
 | `REDERIVE_THRESHOLD` | `0.85` | After any detection, thinking this Jaccard-similar to the reasoning that led to it is trimmed from context (re-derived reasoning guard) |
+| `READ_AFTER_WRITE` | `0` | `0` = off; `1` = reset per-path read ceiling (`FILE_SCAN_LIMIT` counter) when a path is written to — lets the model re-read a file after editing it without burning its read budget |
 | `HOOK_CMD` | `""` | External command per detection; `/set` preserves values such as `node /path/hook.mjs` (execution uses whitespace argv splitting, so paths containing spaces remain unsupported) |
 | `HOOK_TIMEOUT_MS` | `5000` | `HOOK_CMD` is killed after this many ms |
 | `HOOK_LOG` | `""` | Path to a JSONL file; one payload line appended per detection (relative paths resolve against the session cwd) |
 
-Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_SCAN_LIMIT=0` (file read ceiling), `REREAD_WINDOW=0` (redundant re-read), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop), `REDERIVE_THRESHOLD=0` (re-derived reasoning guard).
+Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_SCAN_LIMIT=0` (file read ceiling), `REREAD_WINDOW=0` (redundant re-read), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop), `REDERIVE_THRESHOLD=0` (re-derived reasoning guard), `READ_AFTER_WRITE=0` (ceiling reset on write).
 
 Pre-1.8.0 configs used other names (`MIN_THINKING_WINDOW`, `MIN_OUTPUT_WINDOW`, `MAX_THINKING_WINDOW`, `CHECK_STRIDE`, `PARA_FINGERPRINT_LEN`, `PARA_LOOP_THRESHOLD`) — they are migrated automatically on load. Pre-1.12.0 configs may still carry `FILE_READ_LIMIT` / `MSG_FILE_READ_LOOP` (the removed same-range detector) — they are dropped automatically on load.
 

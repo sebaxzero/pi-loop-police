@@ -62,6 +62,7 @@ Identical re-reads are the tool call sequence detector's job (below): reading th
 
 Only reads that **actually ran** count toward the ceiling. A call blocked by any detector never reached the file, so it does not spend the budget and never inflates the reported count. Raise the limit for workflows where heavy re-reading is legitimate, or run `/loop-police reset` to clear the counters mid-session. Note the redundant re-read window (next) judges re-reading more strictly: there, a re-read only counts as fresh when the file itself was edited in between.
 
+`READ_AFTER_WRITE` (default `0` = off) extends the same idea to the ceiling counter: when set to `1`, writing or editing a path resets its `FILE_SCAN_LIMIT` total, so the next read starts from a fresh budget. This is useful with tools like `pi-hashline-edit` that rewrite files with new anchors — the model legitimately needs a re-read after each write, and the ceiling should not punish that.
 ### Redundant re-read window
 
 The failure mode neither of the per-target counters can see: a model sweeping a repo (an audit, a review) loses track of which files it already read and starts re-reading them — interleaved with fresh reads, so no per-path total climbs toward the ceiling and no identical call sequence ever forms. The symptom in the thinking is generic ("Let me continue reading…") while progress has stopped.
@@ -130,6 +131,7 @@ CONSECUTIVE_LOOP_LIMIT: 2   // looped turns in a row before the message escalate
 TOOL_LOOP_BAN: 1            // 0 = off · 1 = block while repeated back-to-back · 2 = session ban
 TOOL_LOOP_EXEMPT: ""        // tool names exempt from the tool call loop detector
 REDERIVE_THRESHOLD: 0.85    // post-detection thinking this similar to the blocked plan is trimmed
+READ_AFTER_WRITE: 0         // 0 = off; 1 = reset per-path read ceiling when written to
 HOOK_CMD: ""                // external command run on every detection (see Detection hooks)
 HOOK_TIMEOUT_MS: 5000       // HOOK_CMD is killed after this many ms
 HOOK_LOG: ""                // JSONL file appended on every detection (see Detection hooks)
@@ -159,6 +161,7 @@ Setting a detector's key to `0` turns it off entirely:
 | `CONSECUTIVE_LOOP_LIMIT=0` | escalated consecutive-loop message |
 | `TOOL_LOOP_BAN=0` | tool call sequence loop |
 | `REDERIVE_THRESHOLD=0` | re-derived reasoning guard |
+| `READ_AFTER_WRITE=0` | per-path ceiling reset on write |
 
 ### Customizing recovery messages
 
