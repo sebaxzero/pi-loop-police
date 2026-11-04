@@ -483,10 +483,15 @@ export default function (pi: ExtensionAPI) {
       }
       const survivor = loopStream === "thinking" ? prefix : extractThinking(event.message);
       if (survivor) lastThinking = survivor;
-      pi.sendMessage(
-        { customType: "loop-police", content: withSuffix(advice), display: true },
-        { triggerTurn: true }
-      );
+
+      //Fix: https://github.com/sebaxzero/pi-loop-police/issues/11
+      setTimeout(() => {
+        pi.sendMessage(
+          { customType: "loop-police", content: withSuffix(advice), display: true },
+          { triggerTurn: true }
+        );
+      }, 0);
+      
       return { message: cleaned };
     }
 
