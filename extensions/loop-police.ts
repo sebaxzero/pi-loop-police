@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -314,8 +314,10 @@ export default function (pi: ExtensionAPI) {
     const log = String(cfg.HOOK_LOG ?? "").trim();
     if (log) {
       try {
+        const logPath = isAbsolute(log) ? log : resolve(ctx.cwd, log);
+        mkdirSync(dirname(logPath), { recursive: true });
         appendFileSync(
-          isAbsolute(log) ? log : resolve(ctx.cwd, log),
+          logPath,
           JSON.stringify(payload) + "\n",
           "utf-8"
         );
