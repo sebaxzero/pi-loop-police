@@ -236,7 +236,7 @@ notify-send "loop-police" "$event detected"
 /loop-police set HOOK_LOG=/home/user/.pi/loop-stats.jsonl
 ```
 
-Appends one payload line per detection (relative paths resolve against the session cwd). Point every project at the same absolute path and the answer to "which model and which detector fire the most" is a one-liner:
+Appends one payload line per detection (relative paths resolve against the session cwd; parent directories are created automatically). Point every project at the same absolute path and the answer to "which model and which detector fire the most" is a one-liner:
 
 ```bash
 jq -r '"\(.model.id // "?") \(.event)"' loop-stats.jsonl | sort | uniq -c | sort -rn

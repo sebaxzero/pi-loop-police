@@ -55,7 +55,7 @@ loops in real time before they exhaust your context window.
 | `REDERIVE_THRESHOLD` | `0.85` | After any detection, thinking this Jaccard-similar to the reasoning that led to it is trimmed from context (re-derived reasoning guard) |
 | `HOOK_CMD` | `""` | External command per detection; `/set` preserves values such as `node /path/hook.mjs` (execution uses whitespace argv splitting, so paths containing spaces remain unsupported) |
 | `HOOK_TIMEOUT_MS` | `5000` | `HOOK_CMD` is killed after this many ms |
-| `HOOK_LOG` | `""` | Path to a JSONL file; one payload line appended per detection (relative paths resolve against the session cwd) |
+| `HOOK_LOG` | `""` | Path to a JSONL file; one payload line appended per detection (relative paths resolve against the session cwd; parent directories are created automatically) |
 
 Setting a detector's key to `0` disables it: `THINKING_WINDOW=0` (char thinking loop), `OUTPUT_WINDOW=0` (char output loop), `SEMANTIC_THRESHOLD=0` (semantic loop, both streams), `STAGNATION_WINDOW=0` (stagnation), `FILE_SCAN_LIMIT=0` (file read ceiling), `REREAD_WINDOW=0` (redundant re-read), `SEARCH_EXPAND_LIMIT=0` (search spiral), `CONSECUTIVE_LOOP_LIMIT=0` (escalated warning), `TOOL_LOOP_BAN=0` (tool call loop), `REDERIVE_THRESHOLD=0` (re-derived reasoning guard).
 
